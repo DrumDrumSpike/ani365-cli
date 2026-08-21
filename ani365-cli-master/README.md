@@ -40,6 +40,27 @@ scoop uninstall ani365-cli
 install -Dm755 ani365-cli "$HOME/.local/bin/ani365-cli"
 ```
 
+### iOS через iSH и VLC
+
+Установите iSH и VLC из App Store, затем установите зависимости внутри iSH:
+
+```sh
+apk add grep sed curl bash fzf git ncurses jq ffmpeg
+git clone --depth 1 https://github.com/DrumDrumSpike/ani365-cli ~/.ani365-cli
+cp ~/.ani365-cli/ani365-cli-master/ani365-cli /usr/local/bin/ani365-cli
+chmod +x /usr/local/bin/ani365-cli
+rm -rf ~/.ani365-cli
+```
+
+Клиент автоматически распознаёт iSH. При запуске он выводит кликабельную
+`vlc://`-ссылку: нажмите на неё, чтобы передать видеопоток в VLC for iOS.
+Исполняемый файл `vlc` внутри Alpine устанавливать не нужно.
+
+VLC for iOS не позволяет iSH автоматически подключить внешний ASS-файл к
+сетевому потоку. Поэтому переводы с софтсабами откроются без субтитров;
+озвучки работают без этого ограничения. Для софтсабов пока следует использовать
+веб-плеер Anime365 либо вручную загружать видео и ASS.
+
 Скрипт также работает в Git Bash и WSL, если необходимые зависимости доступны
 через `PATH`. Основная поддерживаемая среда — Linux с mpv.
 
