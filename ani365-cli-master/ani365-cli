@@ -2,7 +2,7 @@
 # Based on ani-cli 5.0.2 (https://github.com/pystardust/ani-cli).
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-version_number="0.1.0"
+version_number="0.1.1"
 program="ani365-cli"
 base_url="${ANI365_BASE_URL:-https://smotret-anime.app/api}"
 quality="${ANI365_QUALITY:-best}"
@@ -60,9 +60,11 @@ api_get() {
     shift 2
     case "$base_url" in https://*) ;; *) die "ANI365_BASE_URL must use HTTPS" ;; esac
     _url="${base_url%/}/${_path#/}"
+    if [ "$_auth" = auth ] && [ ! -s "$token_file" ]; then
+        die "Authorization required. Run: $program --auth"
+    fi
     _response=$(
         if [ "$_auth" = auth ]; then
-            [ -s "$token_file" ] || die "Authorization required. Run: $program --auth"
             curl --silent --show-error --location --connect-timeout 10 --max-time 30 \
                 --retry 2 --retry-delay 1 --user-agent "$program/$version_number" \
                 --header 'Accept: application/json' --get \
@@ -134,8 +136,18 @@ auth_store() {
 
 search_series() {
     api_get series public --data-urlencode "query=$1" \
-        --data-urlencode 'limit=50' --data-urlencode 'fields=id,titles,type,typeTitle,year,myAnimeListId' |
-        jq -r '.data[] | [(.id|tostring), (.titles.ru // .titles.romaji // .titles.en // (.titles|to_entries[0].value) // "Untitled"), (.typeTitle // .type // "?"), (.year // "?"|tostring), (.myAnimeListId // 0|tostring)] | @tsv'
+        --data-urlencode 'limit=1000' --data-urlencode 'fields=id,titles,type,typeTitle,year,myAnimeListId' |
+        jq -r --arg query "$1" '
+          .data |
+          sort_by(
+            if any(.titles[]?; . == $query) then 0
+            elif any(.titles[]?; startswith($query)) then 1
+            elif any(.titles[]?; contains($query)) then 2
+            elif any(.titles[]?; test($query; "i")) then 3
+            else 4 end,
+            -(.year // 0)
+          )[] |
+          [(.id|tostring), (.titles.ru // .titles.romaji // .titles.en // (.titles|to_entries[0].value) // "Untitled"), (.typeTitle // .type // "?"), (.year // "?"|tostring), (.myAnimeListId // 0|tostring)] | @tsv'
 }
 
 get_episodes() {
@@ -197,7 +209,8 @@ history_put() {
 play_selected() {
     _translation_id=$1
     _title=$2
-    _streams=$(get_streams "$_translation_id")
+    [ -s "$token_file" ] || die "Authorization required. Run: $program --auth"
+    _streams=$(get_streams "$_translation_id") || return 1
     [ -n "$_streams" ] || die "No playable streams returned for translation $_translation_id"
     _stream=$(choose_stream "$_streams")
     _video=$(printf '%s' "$_stream" | cut -f 2)
