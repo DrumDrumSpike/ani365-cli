@@ -2,7 +2,7 @@
 # Based on ani-cli 5.0.2 (https://github.com/pystardust/ani-cli).
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-version_number="0.1.2"
+version_number="0.1.3"
 program="ani365-cli"
 base_url="${ANI365_BASE_URL:-https://smotret-anime.app/api}"
 quality="${ANI365_QUALITY:-best}"
@@ -178,12 +178,19 @@ choose_translation() {
 }
 
 get_streams() {
-    api_get "translations/embed/$1" auth | jq -r '
+    _origin=$(printf '%s' "$base_url" | sed -E 's|(https://[^/]+).*|\1|')
+    api_get "translations/embed/$1" auth | jq -r --arg origin "$_origin" '
+      def absolute_url:
+        if . == "" then ""
+        elif startswith("//") then "https:" + .
+        elif startswith("/") then $origin + .
+        elif test("^https?://") then .
+        else $origin + "/" + . end;
       .data as $d |
       (($d.stream // $d.streams // $d.data.stream // [])[]? |
         (.height // .quality // 0) as $h |
         (.urls // .urlList // (if .url then [.url] else [] end))[]? |
-        [($h|tostring), ., ($d.subtitlesUrl // $d.subtitles.url // "")]) | @tsv'
+        [($h|tostring), (. | absolute_url), (($d.subtitlesUrl // $d.subtitles.url // "") | absolute_url)]) | @tsv'
 }
 
 choose_stream() {
