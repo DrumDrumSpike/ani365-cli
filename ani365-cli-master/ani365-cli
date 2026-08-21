@@ -2,7 +2,7 @@
 # Based on ani-cli 5.0.2 (https://github.com/pystardust/ani-cli).
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-version_number="0.1.1"
+version_number="0.1.2"
 program="ani365-cli"
 base_url="${ANI365_BASE_URL:-https://smotret-anime.app/api}"
 quality="${ANI365_QUALITY:-best}"
@@ -63,12 +63,16 @@ api_get() {
     if [ "$_auth" = auth ] && [ ! -s "$token_file" ]; then
         die "Authorization required. Run: $program --auth"
     fi
+    _curl_token_file=$token_file
+    if [ "$_auth" = auth ] && command -v cygpath >/dev/null 2>&1; then
+        _curl_token_file=$(cygpath -w "$token_file") || die "Cannot convert token file path"
+    fi
     _response=$(
         if [ "$_auth" = auth ]; then
             curl --silent --show-error --location --connect-timeout 10 --max-time 30 \
                 --retry 2 --retry-delay 1 --user-agent "$program/$version_number" \
                 --header 'Accept: application/json' --get \
-                --data-urlencode "access_token@$token_file" "$@" \
+                --data-urlencode "access_token@$_curl_token_file" "$@" \
                 --write-out '\n%{http_code}' "$_url"
         else
             curl --silent --show-error --location --connect-timeout 10 --max-time 30 \
