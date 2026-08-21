@@ -45,7 +45,7 @@ install -Dm755 ani365-cli "$HOME/.local/bin/ani365-cli"
 Установите iSH и VLC из App Store, затем установите зависимости внутри iSH:
 
 ```sh
-apk add grep sed curl bash fzf git ncurses jq ffmpeg
+apk add grep sed curl bash git ncurses jq ffmpeg
 git clone --depth 1 https://github.com/DrumDrumSpike/ani365-cli ~/.ani365-cli
 cp ~/.ani365-cli/ani365-cli-master/ani365-cli /usr/local/bin/ani365-cli
 chmod +x /usr/local/bin/ani365-cli
@@ -55,6 +55,10 @@ rm -rf ~/.ani365-cli
 Клиент автоматически распознаёт iSH. При запуске он выводит прямую кликабельную
 HTTPS-ссылку: нажмите на неё и выберите VLC for iOS для воспроизведения.
 Исполняемый файл `vlc` внутри Alpine устанавливать не нужно.
+
+На iSH используется встроенное нумерованное меню. `fzf` устанавливать не нужно:
+его Go-бинарник может аварийно завершаться в среде iSH. Выбор выполняется вводом
+номера пункта и нажатием Enter.
 
 VLC for iOS не позволяет iSH автоматически подключить внешний ASS-файл к
 сетевому потоку. Поэтому переводы с софтсабами откроются без субтитров;
