@@ -1,5 +1,5 @@
 {
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Клиент командной строки для поиска и просмотра аниме через Anime365",
   "homepage": "https://github.com/DrumDrumSpike/ani365-cli",
   "license": "GPL-3.0-or-later",
@@ -10,7 +10,7 @@
         "https://raw.githubusercontent.com/DrumDrumSpike/ani365-cli/main/ani365-cli-master/ani365-cli.cmd"
       ],
       "hash": [
-        "71be92e0b78dfde69a4e0de586fa4a91a4a47ed3dfdf22126e684f5362db3cb6",
+        "601660efc873214c3d70a776f5bb2fc702893240b3abbd8676c5e99b97c5f58",
         "ee783cfb098935d6e3ac3311fe0239755dcc73db2a2c1117a7ef1750829fc2b8"
       ]
     }

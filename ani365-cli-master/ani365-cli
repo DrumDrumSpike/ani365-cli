@@ -2,7 +2,7 @@
 # Based on ani-cli 5.0.2 (https://github.com/pystardust/ani-cli).
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-version_number="0.1.4"
+version_number="0.1.5"
 program="ani365-cli"
 base_url="${ANI365_BASE_URL:-https://smotret-anime.app/api}"
 quality="${ANI365_QUALITY:-best}"
@@ -176,10 +176,20 @@ get_translations() {
 
 choose_translation() {
     _all=$1
-    _preferred=$(printf '%s\n' "$_all" | awk -F '\t' -v kind="$translation_kind" -v lang="$language" -v author="$translator" '
-        $2 == kind && $3 == lang && (author == "" || index(tolower($6), tolower(author))) { print }')
-    [ -n "$_preferred" ] || { warn "Preferred translation not found; showing all translations"; _preferred=$_all; }
-    _display=$(printf '%s\n' "$_preferred" | awk -F '\t' '{ printf "%s\t[%s %s · %s · %sp] %s\n", $1, toupper($2), toupper($3), toupper($4), ($5 ? $5 : "?"), $6 }')
+    if [ -n "$translator" ]; then
+        _profile_matches=$(printf '%s\n' "$_all" | awk -F '\t' -v kind="$translation_kind" -v lang="$language" -v author="$translator" '
+            $2 == kind && $3 == lang && index(tolower($6), tolower(author)) { print }')
+        _profile_count=$(printf '%s\n' "$_profile_matches" | sed '/^$/d' | wc -l | tr -d ' ')
+        [ "$_profile_count" -eq 1 ] && { printf '%s' "$_profile_matches" | cut -f 1; return; }
+    fi
+    _display=$(printf '%s\n' "$_all" | awk -F '\t' -v kind="$translation_kind" -v lang="$language" -v author="$translator" '
+      {
+        rank = 3
+        if ($2 == kind && $3 == lang && (author == "" || index(tolower($6), tolower(author)))) rank = 0
+        else if ($2 == kind && $3 == lang) rank = 1
+        else if ($3 == lang) rank = 2
+        printf "%s\t%s\t[%s %s · %s · %sp] %s\n", rank, $1, toupper($2), toupper($3), toupper($4), ($5 ? $5 : "?"), $6
+      }' | sort -t "$(printf '\t')" -k1,1n -k2,2nr | cut -f 2-)
     _chosen=$(printf '%s\n' "$_display" | select_line 'Select translation: ')
     [ -n "$_chosen" ] || die "Invalid translation selection"
     printf '%s' "$_chosen" | cut -f 1
@@ -248,8 +258,8 @@ play_selected() {
                     if [ -n "$_sub" ]; then
                         warn "VLC for iOS cannot automatically attach external ASS subtitles from iSH"
                     fi
-                    printf '\033]8;;vlc://%s\a~~~~~~~~~~~~~~~~~~~~~~~~\n~ Tap to open in VLC iOS ~\n~~~~~~~~~~~~~~~~~~~~~~~~\033]8;;\a\n' "$_video"
-                    printf 'If the link is not clickable, copy this URL into VLC:\nvlc://%s\n' "$_video"
+                    printf '\033]8;;%s\a~~~~~~~~~~~~~~~~~~~~~~~~\n~ Tap to open in VLC iOS ~\n~~~~~~~~~~~~~~~~~~~~~~~~\033]8;;\a\n' "$_video"
+                    printf 'If the link is not clickable, copy this URL into VLC:\n%s\n' "$_video"
                     ;;
                 *vlc*)
                     _sub_file=
