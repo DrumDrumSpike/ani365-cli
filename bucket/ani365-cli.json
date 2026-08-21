@@ -1,0 +1,39 @@
+{
+  "version": "0.1.0",
+  "description": "Клиент командной строки для поиска и просмотра аниме через Anime365",
+  "homepage": "https://github.com/DrumDrumSpike/ani365-cli",
+  "license": "GPL-3.0-or-later",
+  "architecture": {
+    "64bit": {
+      "url": [
+        "https://raw.githubusercontent.com/DrumDrumSpike/ani365-cli/main/ani365-cli-master/ani365-cli",
+        "https://raw.githubusercontent.com/DrumDrumSpike/ani365-cli/main/ani365-cli-master/ani365-cli.cmd"
+      ],
+      "hash": [
+        "0f21ae9cd3dfddef0144ce7011f703a813639a15153a71c376e043bc6d400fc2",
+        "ee783cfb098935d6e3ac3311fe0239755dcc73db2a2c1117a7ef1750829fc2b8"
+      ]
+    }
+  },
+  "depends": [
+    "git",
+    "jq",
+    "fzf",
+    "mpv"
+  ],
+  "bin": "ani365-cli.cmd",
+  "checkver": {
+    "url": "https://raw.githubusercontent.com/DrumDrumSpike/ani365-cli/main/ani365-cli-master/ani365-cli",
+    "regex": "version_number=\"([\\d.]+)\""
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": [
+          "https://raw.githubusercontent.com/DrumDrumSpike/ani365-cli/main/ani365-cli-master/ani365-cli",
+          "https://raw.githubusercontent.com/DrumDrumSpike/ani365-cli/main/ani365-cli-master/ani365-cli.cmd"
+        ]
+      }
+    }
+  }
+}

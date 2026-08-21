@@ -1,0 +1,363 @@
+#!/bin/sh
+# Based on ani-cli 5.0.2 (https://github.com/pystardust/ani-cli).
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+version_number="0.1.0"
+program="ani365-cli"
+base_url="${ANI365_BASE_URL:-https://smotret-anime.app/api}"
+quality="${ANI365_QUALITY:-best}"
+language="${ANI365_LANG:-ru}"
+translation_kind="${ANI365_TRANSLATION_KIND:-sub}"
+translator="${ANI365_TRANSLATOR:-}"
+download_dir="${ANI365_DOWNLOAD_DIR:-.}"
+player="${ANI365_PLAYER:-mpv}"
+menu_program="${ANI365_MENU:-fzf}"
+state_dir="${ANI365_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ani365-cli}"
+config_dir="${ANI365_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/ani365-cli}"
+token_file="${ANI365_TOKEN_FILE:-$config_dir/access_token}"
+history_file="$state_dir/history.tsv"
+mode=play
+query=
+episode_spec=
+select_index=
+continue_mode=0
+exit_after_play=0
+
+die() { printf '\033[1;31m%s\033[0m\n' "$*" >&2; exit 1; }
+info() { printf '\033[1;34m%s\033[0m\n' "$*" >&2; }
+warn() { printf '\033[1;33m%s\033[0m\n' "$*" >&2; }
+need() { command -v "$1" >/dev/null 2>&1 || die "Required program not found: $1"; }
+
+usage() {
+    cat <<EOF
+Usage: $program [options] [query]
+
+  -c, --continue             Continue from history
+  -d, --download             Download instead of playing
+  -e, -r, --episode, --range EP or START-END
+  -q, --quality QUALITY      best, worst, 1080, 720, ...
+  -S, --select-nth N         Select Nth search result
+  -v, --vlc                  Use VLC
+      --dub                  Prefer voice translation
+      --sub                  Prefer subtitle translation
+      --lang LANG            Translation language (ru, en, jp)
+      --translation NAME     Prefer translator/team
+      --auth                 Read and store an access token
+      --logout               Remove the stored access token
+      --exit-after-play      Wait for the player and return its status
+  -D, --delete-history       Delete ani365-cli history
+  -V, --version              Print version
+  -h, --help                 Show this help
+
+Environment: ANI365_BASE_URL, ANI365_PLAYER, ANI365_MENU, ANI365_QUALITY,
+ANI365_LANG, ANI365_TRANSLATION_KIND, ANI365_TRANSLATOR, ANI365_TOKEN_FILE.
+EOF
+}
+
+api_get() {
+    _path=$1
+    _auth=$2
+    shift 2
+    case "$base_url" in https://*) ;; *) die "ANI365_BASE_URL must use HTTPS" ;; esac
+    _url="${base_url%/}/${_path#/}"
+    _response=$(
+        if [ "$_auth" = auth ]; then
+            [ -s "$token_file" ] || die "Authorization required. Run: $program --auth"
+            curl --silent --show-error --location --connect-timeout 10 --max-time 30 \
+                --retry 2 --retry-delay 1 --user-agent "$program/$version_number" \
+                --header 'Accept: application/json' --get \
+                --data-urlencode "access_token@$token_file" "$@" \
+                --write-out '\n%{http_code}' "$_url"
+        else
+            curl --silent --show-error --location --connect-timeout 10 --max-time 30 \
+                --retry 2 --retry-delay 1 --user-agent "$program/$version_number" \
+                --header 'Accept: application/json' --get "$@" \
+                --write-out '\n%{http_code}' "$_url"
+        fi
+    ) || die "Network request failed: $_path"
+    _status=$(printf '%s\n' "$_response" | tail -n 1)
+    _body=$(printf '%s\n' "$_response" | sed '$d')
+    case "$_status" in
+        2??) ;;
+        403) die "Access denied: token is invalid or the account has no active subscription" ;;
+        404) die "Anime365 resource not found" ;;
+        *)
+            _message=$(printf '%s' "$_body" | jq -r '.error.message // empty' 2>/dev/null)
+            die "Anime365 API error $_status${_message:+: $_message}"
+            ;;
+    esac
+    printf '%s' "$_body" | jq -e . >/dev/null 2>&1 || die "Anime365 returned invalid JSON"
+    printf '%s' "$_body"
+}
+
+select_line() {
+    _prompt=$1
+    _items=$(cat)
+    [ -n "$_items" ] || return 1
+    _count=$(printf '%s\n' "$_items" | wc -l | tr -d ' ')
+    [ "$_count" -eq 1 ] && { printf '%s\n' "$_items"; return; }
+    if command -v "$menu_program" >/dev/null 2>&1; then
+        case "$menu_program" in
+            fzf) printf '%s\n' "$_items" | fzf --reverse --cycle --prompt "$_prompt" ;;
+            rofi) printf '%s\n' "$_items" | rofi -dmenu -i -p "$_prompt" ;;
+            dmenu) printf '%s\n' "$_items" | dmenu -l 20 -p "$_prompt" ;;
+            *) printf '%s\n' "$_items" | "$menu_program" "$_prompt" ;;
+        esac
+    elif [ -t 0 ]; then
+        printf '%s\n' "$_items" | nl -w 2 -s ') ' >&2
+        printf '%s: ' "$_prompt" >&2
+        IFS= read -r _choice
+        printf '%s\n' "$_items" | sed -n "${_choice}p"
+    else
+        die "No interactive menu available; install fzf or run in a terminal"
+    fi
+}
+
+auth_store() {
+    mkdir -p "$config_dir" || die "Cannot create $config_dir"
+    printf 'Paste Anime365 access token (input hidden): ' >&2
+    _old_stty=$(stty -g 2>/dev/null || true)
+    [ -n "$_old_stty" ] && stty -echo
+    IFS= read -r _token
+    [ -n "$_old_stty" ] && { stty "$_old_stty"; printf '\n' >&2; }
+    [ -n "$_token" ] || die "Empty token"
+    umask 077
+    printf '%s' "$_token" >"$token_file" || die "Cannot write token file"
+    unset _token
+    api_get me auth | jq -e '.data.isLogined == true' >/dev/null || {
+        rm -f "$token_file"
+        die "Token validation failed"
+    }
+    info "Token stored in $token_file"
+    exit 0
+}
+
+search_series() {
+    api_get series public --data-urlencode "query=$1" \
+        --data-urlencode 'limit=50' --data-urlencode 'fields=id,titles,type,typeTitle,year,myAnimeListId' |
+        jq -r '.data[] | [(.id|tostring), (.titles.ru // .titles.romaji // .titles.en // (.titles|to_entries[0].value) // "Untitled"), (.typeTitle // .type // "?"), (.year // "?"|tostring), (.myAnimeListId // 0|tostring)] | @tsv'
+}
+
+get_episodes() {
+    api_get episodes public --data-urlencode "seriesId=$1" --data-urlencode 'limit=1000' \
+        --data-urlencode 'isActive=1' --data-urlencode 'fields=id,seriesId,episodeFull,episodeInt,episodeTitle,episodeType,isActive' |
+        jq -r '.data | sort_by(.episodeType, .episodeInt)[] | [(.id|tostring), (.episodeType // "tv"), ((.episodeInt // .episodeFull)|tostring), (.episodeTitle // "")] | @tsv'
+}
+
+get_translations() {
+    api_get translations public --data-urlencode "episodeId=$1" --data-urlencode 'limit=1000' \
+        --data-urlencode 'isActive=1' --data-urlencode 'fields=id,episodeId,authorsSummary,title,type,typeKind,typeLang,qualityType,height,isActive,priority' |
+        jq -r '.data | sort_by(-(.priority // 0), -(.height // 0))[] | [(.id|tostring), (.typeKind // (if (.type // "")|startswith("voice") then "voice" else "sub" end)), (.typeLang // ((.type // "")|capture("(?<l>[A-Z][a-z]+)$").l? // "")|ascii_downcase), (.qualityType // "?"), ((.height // 0)|tostring), (.authorsSummary // .title // "Unknown")] | @tsv'
+}
+
+choose_translation() {
+    _all=$1
+    _preferred=$(printf '%s\n' "$_all" | awk -F '\t' -v kind="$translation_kind" -v lang="$language" -v author="$translator" '
+        $2 == kind && $3 == lang && (author == "" || index(tolower($6), tolower(author))) { print }')
+    [ -n "$_preferred" ] || { warn "Preferred translation not found; showing all translations"; _preferred=$_all; }
+    _display=$(printf '%s\n' "$_preferred" | awk -F '\t' '{ printf "%s\t[%s %s · %s · %sp] %s\n", $1, toupper($2), toupper($3), toupper($4), ($5 ? $5 : "?"), $6 }')
+    _chosen=$(printf '%s\n' "$_display" | select_line 'Select translation: ')
+    [ -n "$_chosen" ] || die "Invalid translation selection"
+    printf '%s' "$_chosen" | cut -f 1
+}
+
+get_streams() {
+    api_get "translations/embed/$1" auth | jq -r '
+      .data as $d |
+      (($d.stream // $d.streams // $d.data.stream // [])[]? |
+        (.height // .quality // 0) as $h |
+        (.urls // .urlList // (if .url then [.url] else [] end))[]? |
+        [($h|tostring), ., ($d.subtitlesUrl // $d.subtitles.url // "")]) | @tsv'
+}
+
+choose_stream() {
+    _streams=$1
+    case "$quality" in
+        best) printf '%s\n' "$_streams" | sort -t "$(printf '\t')" -k1,1nr | head -n 1 ;;
+        worst) printf '%s\n' "$_streams" | sort -t "$(printf '\t')" -k1,1n | head -n 1 ;;
+        *)
+            _wanted=$(printf '%s' "$quality" | tr -cd '0-9')
+            _selected=$(printf '%s\n' "$_streams" | awk -F '\t' -v q="$_wanted" '$1 == q {print; exit}')
+            [ -n "$_selected" ] || { warn "Quality $quality not found; using best"; printf '%s\n' "$_streams" | sort -t "$(printf '\t')" -k1,1nr | head -n 1; }
+            [ -n "$_selected" ] && printf '%s\n' "$_selected"
+            ;;
+    esac
+}
+
+history_put() {
+    mkdir -p "$state_dir" || die "Cannot create $state_dir"
+    [ -f "$history_file" ] || : >"$history_file"
+    _safe_title=$(printf '%s' "$series_title" | tr '\t\n' '  ')
+    _safe_author=$(printf '%s' "$translation_author" | tr '\t\n' '  ')
+    awk -F '\t' -v id="$series_id" '$1 != id' "$history_file" >"$history_file.new"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$series_id" "$episode_id" "$episode_type" "$episode_number" "$_safe_title" "$translation_kind" "$language" "$_safe_author" >>"$history_file.new"
+    mv "$history_file.new" "$history_file"
+}
+
+play_selected() {
+    _translation_id=$1
+    _title=$2
+    _streams=$(get_streams "$_translation_id")
+    [ -n "$_streams" ] || die "No playable streams returned for translation $_translation_id"
+    _stream=$(choose_stream "$_streams")
+    _video=$(printf '%s' "$_stream" | cut -f 2)
+    _sub=$(printf '%s' "$_stream" | cut -f 3)
+    [ -n "$_video" ] || die "The selected stream has no URL"
+    case "$mode" in
+        download)
+            need yt-dlp
+            mkdir -p "$download_dir"
+            yt-dlp --no-skip-unavailable-fragments --fragment-retries infinite -N 8 -o "$download_dir/${_title}.mp4" "$_video" || return
+            if [ -n "$_sub" ]; then curl --fail --location --silent --show-error -o "$download_dir/${_title}.ass" "$_sub" || warn "Subtitle download failed"; fi
+            ;;
+        play)
+            case "$player" in
+                *vlc*)
+                    _sub_file=
+                    if [ -n "$_sub" ]; then
+                        _sub_file="${TMPDIR:-/tmp}/ani365-cli-$$.ass"
+                        curl --fail --location --silent --show-error -o "$_sub_file" "$_sub" || _sub_file=
+                    fi
+                    if [ -n "$_sub_file" ]; then
+                        "$player" --play-and-exit --meta-title="$_title" --sub-file="$_sub_file" "$_video"
+                    else
+                        "$player" --play-and-exit --meta-title="$_title" "$_video"
+                    fi
+                    _status=$?
+                    [ -n "$_sub_file" ] && rm -f "$_sub_file"
+                    return "$_status"
+                    ;;
+                *)
+                    need "$player"
+                    if [ "$exit_after_play" -eq 1 ] || [ "${range_playback:-0}" -eq 1 ]; then
+                        if [ -n "$_sub" ]; then
+                            "$player" --force-media-title="$_title" --sub-file="$_sub" "$_video"
+                        else
+                            "$player" --force-media-title="$_title" "$_video"
+                        fi
+                    else
+                        if [ -n "$_sub" ]; then
+                            nohup "$player" --force-media-title="$_title" --sub-file="$_sub" "$_video" >/dev/null 2>&1 &
+                        else
+                            nohup "$player" --force-media-title="$_title" "$_video" >/dev/null 2>&1 &
+                        fi
+                    fi
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -c|--continue) continue_mode=1 ;;
+        -d|--download) mode=download ;;
+        -D|--delete-history) mkdir -p "$state_dir"; : >"$history_file"; exit 0 ;;
+        -e|-r|--episode|--range) [ $# -gt 1 ] || die "Missing episode"; episode_spec=$2; shift ;;
+        -q|--quality) [ $# -gt 1 ] || die "Missing quality"; quality=$2; shift ;;
+        -S|--select-nth) [ $# -gt 1 ] || die "Missing index"; select_index=$2; shift ;;
+        -v|--vlc) player=vlc ;;
+        --dub) translation_kind=voice ;;
+        --sub) translation_kind=sub ;;
+        --lang) [ $# -gt 1 ] || die "Missing language"; language=$2; shift ;;
+        --translation) [ $# -gt 1 ] || die "Missing translator"; translator=$2; shift ;;
+        --exit-after-play) exit_after_play=1 ;;
+        --auth) need curl; need jq; auth_store ;;
+        --logout) rm -f "$token_file"; info "Local token removed"; exit 0 ;;
+        -V|--version) printf '%s\n' "$version_number"; exit 0 ;;
+        -h|--help) usage; exit 0 ;;
+        -*) die "Unknown option: $1" ;;
+        *) query="${query}${query:+ }$1" ;;
+    esac
+    shift
+done
+
+need curl
+need jq
+
+if [ "$continue_mode" -eq 1 ]; then
+    [ -s "$history_file" ] || die "History is empty"
+    _history_display=$(awk -F '\t' '{printf "%s\t%s — %s %s\n", $1, $5, toupper($3), $4}' "$history_file")
+    _history_chosen=$(printf '%s\n' "$_history_display" | select_line 'Continue: ')
+    series_id=$(printf '%s' "$_history_chosen" | cut -f 1)
+    _hist=$(awk -F '\t' -v id="$series_id" '$1 == id {print; exit}' "$history_file")
+    series_title=$(printf '%s' "$_hist" | cut -f 5)
+    episode_spec=$(printf '%s' "$_hist" | cut -f 4)
+    history_episode_type=$(printf '%s' "$_hist" | cut -f 3)
+    translation_kind=$(printf '%s' "$_hist" | cut -f 6)
+    language=$(printf '%s' "$_hist" | cut -f 7)
+    translator=$(printf '%s' "$_hist" | cut -f 8)
+else
+    if [ -z "$query" ]; then printf 'Search anime: ' >&2; IFS= read -r query; fi
+    [ -n "$query" ] || die "Empty search query"
+    _series=$(search_series "$query")
+    [ -n "$_series" ] || die "No anime found"
+    _series_display=$(printf '%s\n' "$_series" | awk -F '\t' '{printf "%s\t%s — %s, %s\n", $1, $2, $3, $4}')
+    if [ -n "$select_index" ]; then _series_chosen=$(printf '%s\n' "$_series_display" | sed -n "${select_index}p"); else _series_chosen=$(printf '%s\n' "$_series_display" | select_line 'Select anime: '); fi
+    [ -n "$_series_chosen" ] || die "Invalid anime selection"
+    series_id=$(printf '%s' "$_series_chosen" | cut -f 1)
+    series_title=$(printf '%s' "$_series_chosen" | cut -f 2 | sed 's/ — .*//')
+fi
+
+episodes=$(get_episodes "$series_id")
+[ -n "$episodes" ] || die "No episodes found"
+if [ "$continue_mode" -eq 1 ]; then
+    episode_spec=$(printf '%s\n' "$episodes" | awk -F '\t' -v type="$history_episode_type" -v watched="$episode_spec" \
+        '$2 == type && $3+0 > watched+0 {print $3; exit}')
+    [ -n "$episode_spec" ] || die "No next episode in history for $series_title"
+fi
+if [ -z "$episode_spec" ]; then
+    _episode_display=$(printf '%s\n' "$episodes" | awk -F '\t' '{printf "%s\t%s %s%s\n", $1, toupper($2), $3, ($4 != "" ? " — "$4 : "")}')
+    _episode_chosen=$(printf '%s\n' "$_episode_display" | select_line 'Select episode: ')
+    selected_episode_id=$(printf '%s' "$_episode_chosen" | cut -f 1)
+    episode_spec=$(printf '%s' "$_episode_chosen" | cut -f 2 | awk '{print $2}')
+fi
+
+if [ -n "${selected_episode_id:-}" ]; then
+    _selected_episodes=$(printf '%s\n' "$episodes" | awk -F '\t' -v id="$selected_episode_id" '$1 == id')
+else
+    case "$episode_spec" in
+        *-*)
+            _start=${episode_spec%-*}
+            _end=${episode_spec#*-}
+            _tv_episodes=$(printf '%s\n' "$episodes" | awk -F '\t' -v first="$_start" -v last="$_end" '$2 == "tv" && $3+0 >= first+0 && $3+0 <= last+0')
+            if [ -n "$_tv_episodes" ]; then
+                _selected_episodes=$_tv_episodes
+            else
+                _selected_episodes=$(printf '%s\n' "$episodes" | awk -F '\t' -v first="$_start" -v last="$_end" '$3+0 >= first+0 && $3+0 <= last+0')
+            fi
+            ;;
+        *)
+            _matches=$(printf '%s\n' "$episodes" | awk -F '\t' -v number="$episode_spec" '$3+0 == number+0')
+            _match_count=$(printf '%s\n' "$_matches" | sed '/^$/d' | wc -l | tr -d ' ')
+            if [ "$_match_count" -gt 1 ]; then
+                _match_display=$(printf '%s\n' "$_matches" | awk -F '\t' '{printf "%s\t%s %s%s\n", $1, toupper($2), $3, ($4 != "" ? " — "$4 : "")}')
+                _match_chosen=$(printf '%s\n' "$_match_display" | select_line 'Select episode type: ')
+                _match_id=$(printf '%s' "$_match_chosen" | cut -f 1)
+                _selected_episodes=$(printf '%s\n' "$_matches" | awk -F '\t' -v id="$_match_id" '$1 == id')
+            else
+                _selected_episodes=$_matches
+            fi
+            ;;
+    esac
+fi
+[ -n "$_selected_episodes" ] || die "Episode or range not found: $episode_spec"
+_selected_count=$(printf '%s\n' "$_selected_episodes" | wc -l | tr -d ' ')
+[ "$_selected_count" -gt 1 ] && range_playback=1
+
+_profile_author=$translator
+printf '%s\n' "$_selected_episodes" | while IFS="$(printf '\t')" read -r episode_id episode_type episode_number episode_title; do
+    translations=$(get_translations "$episode_id")
+    [ -n "$translations" ] || die "No translations for $episode_type $episode_number"
+    translator=$_profile_author
+    translation_id=$(choose_translation "$translations")
+    _translation=$(printf '%s\n' "$translations" | awk -F '\t' -v id="$translation_id" '$1 == id {print; exit}')
+    translation_kind=$(printf '%s' "$_translation" | cut -f 2)
+    language=$(printf '%s' "$_translation" | cut -f 3)
+    translation_author=$(printf '%s' "$_translation" | cut -f 6)
+    [ -n "$_profile_author" ] || _profile_author=$translation_author
+    title="$series_title - $(printf '%s' "$episode_type" | tr '[:lower:]' '[:upper:]') $episode_number"
+    info "Playing $title [$translation_author]"
+    play_selected "$translation_id" "$title" || die "Playback/download failed"
+    history_put
+done

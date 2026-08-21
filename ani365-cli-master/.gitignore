@@ -1,0 +1,6 @@
+fixtures/private/
+*.token
+access_token
+*.mp4
+*.mkv
+*.ass
