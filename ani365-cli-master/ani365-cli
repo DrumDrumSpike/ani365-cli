@@ -2,7 +2,7 @@
 # Based on ani-cli 5.0.2 (https://github.com/pystardust/ani-cli).
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-version_number="0.1.6"
+version_number="0.1.7"
 program="ani365-cli"
 base_url="${ANI365_BASE_URL:-https://smotret-anime.app/api}"
 quality="${ANI365_QUALITY:-best}"
@@ -118,10 +118,10 @@ select_line() {
             dmenu) printf '%s\n' "$_items" | dmenu -l 20 -p "$_prompt" ;;
             *) printf '%s\n' "$_items" | "$menu_program" "$_prompt" ;;
         esac
-    elif [ -t 0 ]; then
-        printf '%s\n' "$_items" | nl -w 2 -s ') ' >&2
-        printf '%s: ' "$_prompt" >&2
-        IFS= read -r _choice
+    elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
+        printf '%s\n' "$_items" | nl -w 2 -s ') ' >/dev/tty
+        printf '%s: ' "$_prompt" >/dev/tty
+        IFS= read -r _choice </dev/tty
         printf '%s\n' "$_items" | sed -n "${_choice}p"
     else
         die "No interactive menu available; install fzf or run in a terminal"
