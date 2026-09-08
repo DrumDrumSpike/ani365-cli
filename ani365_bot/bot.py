@@ -14,6 +14,26 @@ MENU_TTL = 15 * 60
 NOTICE_TTL = 60
 
 
+def text_units(text):
+    return len(text.encode("utf-16-le")) // 2
+
+
+def menu_title(item):
+    name = title(item)
+    encoded = name.encode("utf-16-le")
+    if len(encoded) <= 3000 * 2:
+        return name
+    # Only pathological titles need shortening; preserve the season at the end.
+    return (encoded[:2400 * 2].decode("utf-16-le", errors="ignore") + "…" +
+            encoded[-599 * 2:].decode("utf-16-le", errors="ignore"))
+
+
+def series_entry(item, index):
+    year = str(item.get("year") or "?")[:20]
+    kind = str(item.get("typeTitle") or item.get("type") or "?")[:80]
+    return f"{index + 1}. {menu_title(item)}\n{year} · {kind}"
+
+
 def episode_label(item):
     return f"{item.get('episodeType') or 'tv'} · {item.get('episodeFull') or item.get('episodeInt') or '?'}"
 
@@ -32,6 +52,19 @@ class Session:
     page: int = 0
     message_id: int | None = None
     history: list = field(default_factory=list)
+
+    def pages(self):
+        pages = []
+        start, used = 0, 0
+        for i, item in enumerate(self.items):
+            size = text_units(series_entry(item, i)) + 2 if self.stage == "series" else 0
+            if i > start and (i - start >= PAGE_SIZE or used + size > 3600):
+                pages.append(range(start, i))
+                start, used = i, 0
+            used += size
+        if self.items:
+            pages.append(range(start, len(self.items)))
+        return pages
 
 
 class Bot:
@@ -168,14 +201,20 @@ class Bot:
                     "translations": "Выбери субтитры", "qualities": "Выбери качество"}
         heading = headings[session.stage]
         if "series" in session.selected:
-            heading = f"{title(session.selected['series'])[:200]}\n{heading}"
-        pages = (len(session.items) + PAGE_SIZE - 1) // PAGE_SIZE
-        text = f"{heading} · {session.page + 1}/{pages}"
+            heading = f"{menu_title(session.selected['series'])}\n{heading}"
+        pages = session.pages()
+        text = f"{heading} · {session.page + 1}/{len(pages)}"
+        if session.stage == "series":
+            text += "\nНажми кнопку с номером нужного аниме.\n\n"
+            text += "\n\n".join(series_entry(session.items[i], i) for i in pages[session.page])
         buttons = []
-        for i in range(session.page * PAGE_SIZE, min((session.page + 1) * PAGE_SIZE, len(session.items))):
+        for i in pages[session.page]:
             item = session.items[i]
             if session.stage == "series":
-                label = f"{title(item)} · {item.get('year') or '?'} · {item.get('typeTitle') or item.get('type') or ''}"
+                if not buttons or len(buttons[-1]) == 4:
+                    buttons.append([])
+                buttons[-1].append({"text": str(i + 1), "callback_data": f"{session.nonce}:pick:{i}"})
+                continue
             elif session.stage == "episodes":
                 label = episode_label(item)
             elif session.stage == "translations":
@@ -186,7 +225,7 @@ class Bot:
         navigation = []
         if session.page:
             navigation.append({"text": "←", "callback_data": f"{session.nonce}:page:{session.page - 1}"})
-        if session.page + 1 < pages:
+        if session.page + 1 < len(pages):
             navigation.append({"text": "→", "callback_data": f"{session.nonce}:page:{session.page + 1}"})
         if navigation:
             buttons.append(navigation)
@@ -233,7 +272,7 @@ class Bot:
             index = int(parts[2])
         except ValueError:
             return
-        if action == "page" and 0 <= index < (len(session.items) + PAGE_SIZE - 1) // PAGE_SIZE:
+        if action == "page" and 0 <= index < len(session.pages()):
             session.page = index
             await self.render()
         elif action == "pick" and 0 <= index < len(session.items):
@@ -243,7 +282,7 @@ class Bot:
         session = self.session
         if session.stage == "qualities":
             selected = session.selected
-            text = (f"{title(selected['series'])[:200]}\n"
+            text = (f"{menu_title(selected['series'])}\n"
                     f"Серия: {episode_label(selected['episodes'])}\n"
                     f"Субтитры: {translation_label(selected['translations'])[:200]}\n"
                     f"Качество: {item}p · Формат: MKV\n\n"
