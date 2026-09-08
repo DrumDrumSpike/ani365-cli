@@ -1,0 +1,12 @@
+[Unit]
+Description=Update the personal Anime365 bot from a GitHub release
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ani365-cli
+ExecStart=/usr/bin/bash /opt/ani365-cli/scripts/update.sh
+TimeoutStartSec=30min
+UMask=0077

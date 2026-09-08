@@ -1,0 +1,6 @@
+*
+!ani365_bot/
+!ani365_bot/*.py
+!requirements.txt
+!ani365-cli-master/
+!ani365-cli-master/LICENSE
