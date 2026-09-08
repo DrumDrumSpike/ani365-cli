@@ -13,4 +13,4 @@ deploy.env.*
 .update.lock
 *.sqlite*
 *.key
-.document-api/document.yaml
+document-api/document.yaml
