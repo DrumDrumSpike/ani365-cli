@@ -61,7 +61,11 @@ class Telegram:
             else:
                 response = await self.client.post(self.base + method, json=params, timeout=timeout)
             data = response.json()
-        except (NetworkError, ValueError):
+        except NetworkError as exc:
+            LOG.warning("Telegram method %s failed (network stage=%s)", method, exc.stage)
+            raise APIError("Telegram временно недоступен.") from None
+        except ValueError:
+            LOG.warning("Telegram method %s returned invalid JSON", method)
             raise APIError("Telegram временно недоступен.") from None
         if not isinstance(data, dict):
             raise APIError("Telegram вернул неизвестный ответ.")

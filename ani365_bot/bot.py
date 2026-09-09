@@ -329,10 +329,13 @@ class Bot:
                 filename = self.media.filename(menu_title(selected["series"]),
                                                episode_label(selected["episodes"]), item)
                 async with self.media.prepare(source, filename, group.kind == "sub", group.language) as path:
-                    await self.telegram.call("editMessageText", chat_id=self.config.owner_id,
-                                             message_id=session.message_id,
-                                             text=summary + "\n\nОтправляю файл…",
-                                             reply_markup={"inline_keyboard": []})
+                    try:
+                        await self.telegram.call("editMessageText", chat_id=self.config.owner_id,
+                                                 message_id=session.message_id,
+                                                 text=summary + "\n\nОтправляю файл…",
+                                                 reply_markup={"inline_keyboard": []})
+                    except APIError as exc:
+                        LOG.warning("Upload status update failed (code %s); continuing", exc.code)
                     await self.telegram.call("sendDocument", chat_id=self.config.owner_id,
                                              document=path.as_uri(), caption=shortened(summary, 1024))
             finally:

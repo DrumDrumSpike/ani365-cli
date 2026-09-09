@@ -17,11 +17,15 @@ class FakeTelegram:
         self.calls = []
         self.next_id = 100
         self.delete_error = None
+        self.upload_status_error = None
 
     async def call(self, method, **params):
         self.calls.append((method, params))
         if method == "deleteMessage" and self.delete_error:
             raise self.delete_error
+        if method == "editMessageText" and "Отправляю файл" in params.get("text", "") \
+                and self.upload_status_error:
+            raise self.upload_status_error
         if method == "sendMessage":
             self.next_id += 1
             return {"message_id": self.next_id}
@@ -133,6 +137,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.session.stage, "qualities")
         self.assertEqual(self.bot.session.message_id, first_id)
         self.anime.available_qualities.assert_awaited_once_with(3, "saved")
+        self.telegram.upload_status_error = APIError("temporary")
         await self.bot.handle(self.callback(index=1))
         self.assertIsNone(self.bot.session)
         upload = [p for m, p in self.telegram.calls if m == "sendDocument"][-1]

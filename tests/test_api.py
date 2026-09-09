@@ -83,6 +83,33 @@ class APITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args[3], Path("/jobs/anime-8-1080p.mkv"))
         client.post.assert_not_awaited()
 
+    async def test_telegram_network_failure_logs_method_and_stage(self):
+        client = AsyncMock()
+        client.post.side_effect = NetworkError("secret", stage="response")
+        with self.assertLogs("ani365_bot.api", level="WARNING") as logs:
+            with self.assertRaises(APIError):
+                await Telegram(client, "secret:token").call("editMessageText")
+        message = " ".join(logs.output)
+        self.assertIn("editMessageText failed (network stage=response)", message)
+        self.assertNotIn("secret:token", message)
+
+    async def test_multipart_retries_only_before_request_can_be_accepted(self):
+        client = HTTPClient()
+        success = response({"ok": True})
+        with patch("ani365_bot.http.asyncio.to_thread", new_callable=AsyncMock,
+                   side_effect=[NetworkError("connect", "connect", True), success]) as thread, \
+                patch("ani365_bot.http.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            result = await client.post_file("http://telegram/send", {}, "document", Path("x"))
+        self.assertIs(result, success)
+        self.assertEqual(thread.await_count, 2)
+        sleep.assert_awaited_once_with(1)
+
+        with patch("ani365_bot.http.asyncio.to_thread", new_callable=AsyncMock,
+                   side_effect=NetworkError("response", "response", False)) as thread:
+            with self.assertRaises(NetworkError):
+                await client.post_file("http://telegram/send", {}, "document", Path("x"))
+        self.assertEqual(thread.await_count, 1)
+
     async def test_invalid_api_json_and_missing_data(self):
         client = AsyncMock()
         for value in (Response(200, b"<html>error</html>"), response({"error": "no data"})):
@@ -188,7 +215,6 @@ class ShapeTests(unittest.TestCase):
             self.assertIn(b"mkv-data", sent)
             self.assertIn("Аниме".encode(), sent)
             self.assertEqual(result.json(), {"ok": True})
-
 
 if __name__ == "__main__":
     unittest.main()

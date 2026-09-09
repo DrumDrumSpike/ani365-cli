@@ -2,6 +2,7 @@
 import asyncio
 import http.client
 import json
+import logging
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,8 +11,14 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
+LOG = logging.getLogger(__name__)
+
+
 class NetworkError(Exception):
-    pass
+    def __init__(self, message, stage="request", retry_safe=False):
+        super().__init__(message)
+        self.stage = stage
+        self.retry_safe = retry_safe
 
 
 class NoRedirects(HTTPRedirectHandler):
@@ -93,31 +100,50 @@ class HTTPClient:
             target += "?" + parsed.query
         connection_type = (http.client.HTTPSConnection if parsed.scheme == "https"
                            else http.client.HTTPConnection)
-        connection = connection_type(parsed.hostname, parsed.port, timeout=timeout)
+        connection = None
+        stage, sent = "connect", 0
         try:
+            connection = connection_type(parsed.hostname, parsed.port, timeout=timeout)
             connection.putrequest("POST", target)
             connection.putheader("User-Agent", "ani365-bot/0.1")
             connection.putheader("Accept", "application/json")
             connection.putheader("Content-Type", f"multipart/form-data; boundary={boundary}")
             connection.putheader("Content-Length", str(content_length))
             connection.endheaders()
+            stage = "upload"
             for chunk in chunks:
                 connection.send(chunk)
+                sent += len(chunk)
             connection.send(file_header)
+            sent += len(file_header)
             with path.open("rb") as source:
                 while chunk := source.read(1024 * 1024):
                     connection.send(chunk)
+                    sent += len(chunk)
             connection.send(ending)
+            sent += len(ending)
+            stage = "response"
             response = connection.getresponse()
             body = response.read(8 * 1024 * 1024 + 1)
             if len(body) > 8 * 1024 * 1024:
                 raise NetworkError("Response exceeds the size limit")
             return Response(response.status, body)
-        except (OSError, http.client.HTTPException):
-            raise NetworkError("File upload failed") from None
+        except (OSError, http.client.HTTPException) as exc:
+            LOG.warning("Telegram file transport failed (stage=%s, type=%s, sent=%s, total=%s)",
+                        stage, type(exc).__name__, sent, content_length)
+            raise NetworkError("File upload failed", stage, stage != "response") from None
         finally:
-            connection.close()
+            if connection:
+                connection.close()
 
     async def post_file(self, url, fields, file_field, file_path, timeout=40):
-        return await asyncio.to_thread(
-            self._post_file, url, fields, file_field, file_path, timeout)
+        for attempt in range(2):
+            try:
+                return await asyncio.to_thread(
+                    self._post_file, url, fields, file_field, file_path, timeout)
+            except NetworkError as exc:
+                if attempt == 0 and exc.retry_safe:
+                    LOG.warning("Retrying Telegram file upload before acceptance (stage=%s)", exc.stage)
+                    await asyncio.sleep(1)
+                    continue
+                raise
