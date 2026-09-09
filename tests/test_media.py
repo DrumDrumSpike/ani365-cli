@@ -1,11 +1,14 @@
+import gzip
+import io
 import tempfile
 import time
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from ani365_bot.api import MediaSource
-from ani365_bot.media import MediaError, MediaProcessor, _run, _safe_diagnostic
+from ani365_bot.media import MediaError, MediaProcessor, _normalize_subtitle, _run, _safe_diagnostic
 
 
 class MediaTests(unittest.IsolatedAsyncioTestCase):
@@ -27,6 +30,26 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         value = _safe_diagnostic("/jobs/job-12-34/subtitles.ass: Invalid data")
         self.assertEqual(value, "<media>/subtitles.ass: Invalid data")
 
+    def test_normalizes_gzip_utf16_ass(self):
+        source = "[Script Info]\r\nTitle: Тест\r\n[Events]\r\n"
+        data, suffix = _normalize_subtitle(gzip.compress(source.encode("utf-16")))
+        self.assertEqual(suffix, ".ass")
+        self.assertEqual(data.decode(), source)
+
+    def test_normalizes_cp1251_srt(self):
+        source = "1\r\n00:00:01,000 --> 00:00:02,000\r\nПривет\r\n"
+        data, suffix = _normalize_subtitle(source.encode("cp1251"))
+        self.assertEqual(suffix, ".srt")
+        self.assertIn("Привет", data.decode())
+
+    def test_extracts_webvtt_from_zip(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as target:
+            target.writestr("episode.vtt", "WEBVTT\n\n00:01.000 --> 00:02.000\nText\n")
+        data, suffix = _normalize_subtitle(archive.getvalue())
+        self.assertEqual(suffix, ".vtt")
+        self.assertTrue(data.startswith(b"WEBVTT"))
+
     async def test_prepare_muxes_subtitle_and_always_removes_job(self):
         with tempfile.TemporaryDirectory() as temporary:
             processor = MediaProcessor(temporary)
@@ -44,8 +67,10 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
                 output.write_bytes(b"mkv")
                 return ""
 
-            def subtitle(url, path):
+            def subtitle(url, directory):
+                path = directory / "subtitles.ass"
                 path.write_text("[Script Info]\n")
+                return path
 
             async def to_thread(function, *args):
                 return function(*args)

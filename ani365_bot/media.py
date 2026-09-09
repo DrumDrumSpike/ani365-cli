@@ -1,10 +1,13 @@
 """Ephemeral media download and stream-copy MKV assembly."""
 import asyncio
+import gzip
+import io
 import logging
 import os
 import re
 import shutil
 import time
+import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -15,6 +18,7 @@ from urllib.request import Request, urlopen
 MAX_TELEGRAM_FILE = 1_990_000_000
 MAX_SUBTITLE_FILE = 64 * 1024 * 1024
 LOG = logging.getLogger(__name__)
+SUBTITLE_SUFFIXES = {".ass", ".ssa", ".srt", ".vtt"}
 
 
 class MediaError(Exception):
@@ -37,6 +41,77 @@ def _safe_diagnostic(value):
     value = re.sub(r"/jobs/job-[^\s:'\"]+", "<media>", value)
     value = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", value)
     return " | ".join(line.strip() for line in value.splitlines() if line.strip())[-2000:]
+
+
+def _unpack_subtitle(data, content_encoding):
+    """Return a bounded subtitle payload and a safe compression label."""
+    compression = "none"
+    try:
+        if data.startswith(b"PK\x03\x04"):
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                files = [item for item in archive.infolist()
+                         if not item.is_dir() and Path(item.filename).suffix.lower() in SUBTITLE_SUFFIXES]
+                if not files:
+                    raise MediaError("Архив не содержит поддерживаемых субтитров.")
+                item = files[0]
+                if item.file_size > MAX_SUBTITLE_FILE:
+                    raise MediaError("Файл субтитров оказался слишком большим.")
+                with archive.open(item) as source:
+                    data = source.read(MAX_SUBTITLE_FILE + 1)
+                compression = "zip"
+        elif data.startswith(b"\x1f\x8b") or "gzip" in content_encoding.lower():
+            with gzip.GzipFile(fileobj=io.BytesIO(data)) as source:
+                data = source.read(MAX_SUBTITLE_FILE + 1)
+            compression = "gzip"
+    except (gzip.BadGzipFile, EOFError, OSError, zipfile.BadZipFile, RuntimeError):
+        raise MediaError("Anime365 вернул повреждённый архив субтитров.") from None
+    if len(data) > MAX_SUBTITLE_FILE:
+        raise MediaError("Файл субтитров оказался слишком большим.")
+    return data, compression
+
+
+def _normalize_subtitle(data, content_type="", content_encoding=""):
+    """Unpack, decode and identify the common text subtitle formats."""
+    data, compression = _unpack_subtitle(data, content_encoding)
+    encoding = "utf-8"
+    if data.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        candidates = ("utf-32",)
+    elif data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        candidates = ("utf-16",)
+    else:
+        candidates = ("utf-8-sig", "cp1251")
+    text = None
+    for candidate in candidates:
+        try:
+            text = data.decode(candidate)
+            encoding = candidate
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None or "\x00" in text:
+        raise MediaError("Скачанный файл субтитров имеет неизвестную кодировку.")
+
+    stripped = text.lstrip("\ufeff \t\r\n")
+    lowered = stripped[:4096].lower()
+    if "[script info]" in lowered and "[events]" in text.lower():
+        suffix, subtitle_format = ".ass", "ass"
+    elif stripped.upper().startswith("WEBVTT"):
+        suffix, subtitle_format = ".vtt", "webvtt"
+    elif re.search(r"(?m)^\s*\d+\s*\r?\n\s*\d{1,2}:\d{2}:\d{2}[,.]\d{3}\s+-->", stripped):
+        suffix, subtitle_format = ".srt", "srt"
+    else:
+        content_name = content_type.split(";", 1)[0].strip().lower() or "unknown"
+        magic = data[:8].hex() or "empty"
+        LOG.warning("Subtitle format is unknown (content-type=%s, bytes=%s, magic=%s, "
+                    "compression=%s)", content_name, len(data), magic, compression)
+        if ("html" in content_name or "json" in content_name
+                or lowered.startswith(("<!doctype html", "<html", "{", "[{"))):
+            raise MediaError("Anime365 вернул служебную страницу вместо субтитров.")
+        raise MediaError("Скачанный файл субтитров имеет неизвестный формат.")
+
+    LOG.info("Subtitle normalized (format=%s, encoding=%s, compression=%s, bytes=%s)",
+             subtitle_format, encoding, compression, len(data))
+    return text.encode("utf-8"), suffix
 
 
 async def _run(*args):
@@ -99,27 +174,28 @@ class MediaProcessor:
         return (value or "anime") + ".mkv"
 
     @staticmethod
-    def _download_subtitle(url, path):
+    def _download_subtitle(url, directory):
         if not _safe_url(url):
             raise MediaError("Anime365 вернул некорректную ссылку на субтитры.")
         request = Request(url, headers={"User-Agent": "ani365-bot/0.1"})
         try:
-            with urlopen(request, timeout=60) as response, path.open("wb") as target:
+            with urlopen(request, timeout=60) as response:
+                chunks = []
                 total = 0
                 while chunk := response.read(1024 * 1024):
                     total += len(chunk)
                     if total > MAX_SUBTITLE_FILE:
                         raise MediaError("Файл субтитров оказался слишком большим.")
-                    target.write(chunk)
+                    chunks.append(chunk)
                 if total == 0:
                     raise MediaError("Anime365 вернул пустой файл субтитров.")
                 content_type = str(response.headers.get("Content-Type", "")).lower()
-            prefix = path.read_bytes()[:256].lstrip().lower()
-            if "text/html" in content_type or "application/json" in content_type \
-                    or prefix.startswith((b"<!doctype html", b"<html", b"{")):
-                LOG.warning("Subtitle URL returned non-subtitle content (%s, %s bytes)",
-                            content_type.split(";", 1)[0] or "unknown", total)
-                raise MediaError("Anime365 вернул служебную страницу вместо субтитров.")
+                content_encoding = str(response.headers.get("Content-Encoding", ""))
+            normalized, suffix = _normalize_subtitle(
+                b"".join(chunks), content_type, content_encoding)
+            path = directory / f"subtitles{suffix}"
+            path.write_bytes(normalized)
+            return path
         except MediaError:
             raise
         except HTTPError as exc:
@@ -164,8 +240,8 @@ class MediaProcessor:
             if require_subtitle:
                 if not source.subtitle_url:
                     raise MediaError("Anime365 не вернул субтитры для выбранного перевода.")
-                subtitle = directory / "subtitles.ass"
-                await asyncio.to_thread(self._download_subtitle, source.subtitle_url, subtitle)
+                subtitle = await asyncio.to_thread(
+                    self._download_subtitle, source.subtitle_url, directory)
             await _probe(video, "video")
             if subtitle:
                 await _probe(subtitle, "subtitle")
