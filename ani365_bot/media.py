@@ -32,6 +32,8 @@ def _safe_url(value):
 def _safe_diagnostic(value):
     """Keep tool diagnostics useful without persisting signed media URLs."""
     value = re.sub(r"(?i)\b(?:https?|file)://[^\s'\"<>]+", "<url>", value)
+    value = re.sub(r"/jobs/job-[^/\s:'\"]+/(input\.[a-zA-Z0-9]+|subtitles\.[a-zA-Z0-9]+)",
+                   r"<media>/\1", value)
     value = re.sub(r"/jobs/job-[^\s:'\"]+", "<media>", value)
     value = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", value)
     return " | ".join(line.strip() for line in value.splitlines() if line.strip())[-2000:]
@@ -59,6 +61,17 @@ async def _run(*args):
             LOG.warning("Media tool %s failed (exit %s) without diagnostics", tool, process.returncode)
         raise MediaError("Не удалось скачать или собрать видео. Попробуй другой перевод или качество.")
     return stdout.decode(errors="replace").strip()
+
+
+async def _probe(path, label):
+    try:
+        await _run("ffprobe", "-v", "error", "-show_entries", "format=format_name",
+                   "-of", "default=noprint_wrappers=1:nokey=1", str(path))
+    except MediaError:
+        LOG.warning("Downloaded %s is not recognized: %s", label, path.name)
+        if label == "subtitle":
+            raise MediaError("Скачанный файл субтитров имеет неизвестный формат.") from None
+        raise MediaError("Скачанный видеофайл повреждён или имеет неизвестный формат.") from None
 
 
 class MediaProcessor:
@@ -98,6 +111,15 @@ class MediaProcessor:
                     if total > MAX_SUBTITLE_FILE:
                         raise MediaError("Файл субтитров оказался слишком большим.")
                     target.write(chunk)
+                if total == 0:
+                    raise MediaError("Anime365 вернул пустой файл субтитров.")
+                content_type = str(response.headers.get("Content-Type", "")).lower()
+            prefix = path.read_bytes()[:256].lstrip().lower()
+            if "text/html" in content_type or "application/json" in content_type \
+                    or prefix.startswith((b"<!doctype html", b"<html", b"{")):
+                LOG.warning("Subtitle URL returned non-subtitle content (%s, %s bytes)",
+                            content_type.split(";", 1)[0] or "unknown", total)
+                raise MediaError("Anime365 вернул служебную страницу вместо субтитров.")
         except MediaError:
             raise
         except HTTPError as exc:
@@ -144,6 +166,9 @@ class MediaProcessor:
                     raise MediaError("Anime365 не вернул субтитры для выбранного перевода.")
                 subtitle = directory / "subtitles.ass"
                 await asyncio.to_thread(self._download_subtitle, source.subtitle_url, subtitle)
+            await _probe(video, "video")
+            if subtitle:
+                await _probe(subtitle, "subtitle")
             output = directory / filename
             command = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(video)]
             if subtitle:

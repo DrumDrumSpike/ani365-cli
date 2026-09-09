@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from ani365_bot.api import MediaSource
-from ani365_bot.media import MediaError, MediaProcessor, _run
+from ani365_bot.media import MediaError, MediaProcessor, _run, _safe_diagnostic
 
 
 class MediaTests(unittest.IsolatedAsyncioTestCase):
@@ -23,6 +23,10 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<url>", message)
         self.assertNotIn("very-secret", message)
 
+    def test_diagnostic_keeps_input_basename_without_job_path(self):
+        value = _safe_diagnostic("/jobs/job-12-34/subtitles.ass: Invalid data")
+        self.assertEqual(value, "<media>/subtitles.ass: Invalid data")
+
     async def test_prepare_muxes_subtitle_and_always_removes_job(self):
         with tempfile.TemporaryDirectory() as temporary:
             processor = MediaProcessor(temporary)
@@ -34,6 +38,8 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
                     output = Path(args[args.index("-o") + 1].replace("%(ext)s", "mp4"))
                     output.write_bytes(b"video")
                     return str(output)
+                if args[0] == "ffprobe":
+                    return "matroska"
                 output = Path(args[-1])
                 output.write_bytes(b"mkv")
                 return ""
@@ -63,6 +69,8 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
             processor = MediaProcessor(temporary)
 
             async def run(*args):
+                if args[0] == "ffprobe":
+                    return "mov,mp4"
                 output = Path(args[args.index("-o") + 1].replace("%(ext)s", "mp4"))
                 output.write_bytes(b"video")
                 return str(output)

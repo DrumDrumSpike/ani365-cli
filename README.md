@@ -146,7 +146,9 @@ sudo docker compose logs --since=30m --tail=200 bot
 ```
 
 Строка `Media tool yt-dlp failed` означает ошибку скачивания, а
-`Media tool ffmpeg failed` — ошибку сборки MKV. В журнал попадают код завершения
+`Media tool ffprobe failed` — некорректный скачанный вход, `Media tool ffmpeg failed` —
+ошибку сборки MKV. Имя после `<media>/` показывает, не распознано видео или субтитры.
+В журнал попадают код завершения
 и очищенный текст ошибки; подписанные ссылки на видео заменяются на `<url>`.
 
 ## Обновления через GitHub Releases
