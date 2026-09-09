@@ -154,6 +154,15 @@ class ShapeTests(unittest.TestCase):
         self.assertEqual(cfg.owner_id, 42)
         self.assertEqual(cfg.bot_token, "fake:token")
 
+    def test_watch_check_interval_is_configurable_and_positive(self):
+        with patch.dict(os.environ, {"BOT_TOKEN": "fake:token", "OWNER_ID": "42",
+                                    "WATCH_CHECK_INTERVAL": "17"}, clear=True):
+            self.assertEqual(Config.from_env().watch_check_interval, 17)
+        with patch.dict(os.environ, {"BOT_TOKEN": "fake:token", "OWNER_ID": "42",
+                                    "WATCH_CHECK_INTERVAL": "0"}, clear=True):
+            with self.assertRaises(ValueError):
+                Config.from_env()
+
     def test_invalid_config_rejected_without_echoing_secret(self):
         with patch.dict(os.environ, {"BOT_TOKEN": "secret", "OWNER_ID": "42"}, clear=True):
             with self.assertRaises(ValueError) as raised:

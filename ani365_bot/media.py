@@ -153,12 +153,15 @@ class MediaProcessor:
     def __init__(self, root):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._active_jobs = set()
 
     def cleanup_stale(self, age=3600):
         cutoff = time.time() - age
         for path in self.root.glob("job-*"):
             try:
-                if path.is_dir() and path.stat().st_mtime < cutoff:
+                # Multiple users can prepare media concurrently. A long-running
+                # active job must never look stale merely because another job starts.
+                if path not in self._active_jobs and path.is_dir() and path.stat().st_mtime < cutoff:
                     shutil.rmtree(path)
             except OSError:
                 pass
@@ -231,6 +234,7 @@ class MediaProcessor:
         self.cleanup_stale()
         directory = self.root / f"job-{os.getpid()}-{time.time_ns()}"
         directory.mkdir(mode=0o755)
+        self._active_jobs.add(directory)
         try:
             video = await self._download_video(source.urls, directory)
             if video.stat().st_size >= MAX_TELEGRAM_FILE:
@@ -262,4 +266,5 @@ class MediaProcessor:
             output.chmod(0o644)
             yield output
         finally:
+            self._active_jobs.discard(directory)
             shutil.rmtree(directory, ignore_errors=True)

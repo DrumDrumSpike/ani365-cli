@@ -118,6 +118,21 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
             MediaProcessor(temporary).cleanup_stale()
             self.assertFalse(stale.exists())
 
+    def test_stale_cleanup_keeps_an_active_concurrent_job(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            processor = MediaProcessor(temporary)
+            active = Path(temporary) / "job-active"
+            active.mkdir()
+            old = time.time() - 7200
+            import os
+            os.utime(active, (old, old))
+            processor._active_jobs.add(active)
+            processor.cleanup_stale()
+            self.assertTrue(active.exists())
+            processor._active_jobs.remove(active)
+            processor.cleanup_stale()
+            self.assertFalse(active.exists())
+
     def test_filename_is_safe_for_unicode_filesystems(self):
         name = MediaProcessor.filename("Очень длинное название 🎬" * 30, "tv · 12", 1080)
         self.assertLessEqual(len(name), 120)

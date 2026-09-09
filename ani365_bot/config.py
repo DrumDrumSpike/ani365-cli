@@ -16,6 +16,7 @@ class Config:
     anime_url: str = "https://smotret-anime.app/api"
     telegram_url: str = "http://telegram-bot-api:8081"
     media_dir: Path = Path("/jobs")
+    watch_check_interval: int = 600
 
     @classmethod
     def from_env(cls):
@@ -35,5 +36,12 @@ class Config:
         if (telegram.scheme not in ("http", "https") or not telegram.hostname or telegram.username
                 or telegram.query or telegram.fragment):
             raise ConfigError("TELEGRAM_BOT_API_URL must be an HTTP(S) base URL")
+        interval = os.environ.get("WATCH_CHECK_INTERVAL", "600")
+        try:
+            watch_check_interval = int(interval)
+        except ValueError:
+            raise ConfigError("WATCH_CHECK_INTERVAL must be a positive number of seconds") from None
+        if watch_check_interval <= 0:
+            raise ConfigError("WATCH_CHECK_INTERVAL must be a positive number of seconds")
         return cls(token.strip(), int(owner), Path(os.environ.get("DATA_DIR", "data")), url,
-                   telegram_url, Path(os.environ.get("MEDIA_DIR", "/jobs")))
+                   telegram_url, Path(os.environ.get("MEDIA_DIR", "/jobs")), watch_check_interval)
