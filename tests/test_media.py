@@ -120,9 +120,10 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
 
     def test_filename_is_safe_for_unicode_filesystems(self):
         name = MediaProcessor.filename("Очень длинное название 🎬" * 30, "tv · 12", 1080)
-        self.assertLessEqual(len(name.encode("utf-8")), 224)
+        self.assertLessEqual(len(name), 120)
         self.assertTrue(name.endswith(".mkv"))
-        self.assertNotIn("/", name)
+        self.assertTrue(name.isascii())
+        self.assertIn("tv-12-1080p", name)
 
 
 if __name__ == "__main__":

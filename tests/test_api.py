@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from ani365_bot.api import APIError, Anime365, Telegram, media_source, qualities
 from ani365_bot.config import Config
@@ -68,8 +68,20 @@ class APITests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(APIError) as raised:
                 await Telegram(client, "secret:token").call("sendDocument")
         self.assertIn("не смог прочитать", str(raised.exception))
-        self.assertIn("reason=path", " ".join(logs.output))
+        self.assertIn("reason=filesystem", " ".join(logs.output))
         self.assertNotIn("private-title", " ".join(logs.output))
+
+    async def test_local_document_is_uploaded_as_streaming_multipart(self):
+        client = AsyncMock()
+        client.post_file.return_value = response({"ok": True, "result": {"message_id": 7}})
+        result = await Telegram(client, "secret:token").call(
+            "sendDocument", chat_id=42, document="file:///jobs/anime-8-1080p.mkv", caption="Anime")
+        self.assertEqual(result["message_id"], 7)
+        args = client.post_file.await_args.args
+        self.assertEqual(args[1], {"chat_id": 42, "caption": "Anime"})
+        self.assertEqual(args[2], "document")
+        self.assertEqual(args[3], Path("/jobs/anime-8-1080p.mkv"))
+        client.post.assert_not_awaited()
 
     async def test_invalid_api_json_and_missing_data(self):
         client = AsyncMock()
@@ -157,6 +169,25 @@ class ShapeTests(unittest.TestCase):
             request = opener.return_value.open.call_args.args[0]
             self.assertIn("query=a%26b", request.full_url)
             self.assertIsInstance(opener.call_args.args[0], NoRedirects)
+
+    def test_multipart_upload_streams_file_with_exact_content_length(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "anime-8-1080p.mkv"
+            path.write_bytes(b"mkv-data")
+            connection = MagicMock()
+            connection.getresponse.return_value.status = 200
+            connection.getresponse.return_value.read.return_value = b'{"ok":true}'
+            with patch("ani365_bot.http.http.client.HTTPConnection", return_value=connection):
+                result = HTTPClient()._post_file(
+                    "http://telegram:8081/botsecret/sendDocument",
+                    {"chat_id": 42, "caption": "Аниме"}, "document", path, 60)
+            sent = b"".join(call.args[0] for call in connection.send.call_args_list)
+            length = next(call.args[1] for call in connection.putheader.call_args_list
+                          if call.args[0] == "Content-Length")
+            self.assertEqual(int(length), len(sent))
+            self.assertIn(b"mkv-data", sent)
+            self.assertIn("Аниме".encode(), sent)
+            self.assertEqual(result.json(), {"ok": True})
 
 
 if __name__ == "__main__":

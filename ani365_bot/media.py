@@ -165,13 +165,12 @@ class MediaProcessor:
 
     @staticmethod
     def filename(title, episode, quality):
-        value = re.sub(r"[\\/\x00-\x1f:*?\"<>|]+", " ", f"{title} — {episode} — {quality}p")
-        value = re.sub(r"\s+", " ", value).strip(" .")
-        encoded = value.encode("utf-8")
-        if len(encoded) > 220:
-            value = (encoded[:150].decode("utf-8", errors="ignore").rstrip() + "…" +
-                     encoded[-65:].decode("utf-8", errors="ignore").lstrip())
-        return (value or "anime") + ".mkv"
+        # Local Bot API resolves a file URI in its own container. Keep the on-disk
+        # basename ASCII-only so URI decoding cannot change the filesystem path.
+        value = f"{title} {episode} {quality}p"
+        parts = re.findall(r"[A-Za-z0-9]+", value)
+        suffix = "-".join(parts[-10:]).lower()
+        return f"anime-{suffix or str(quality) + 'p'}.mkv"
 
     @staticmethod
     def _download_subtitle(url, directory):

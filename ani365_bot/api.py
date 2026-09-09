@@ -1,7 +1,8 @@
 import asyncio
 import logging
 from dataclasses import dataclass
-from urllib.parse import urljoin
+from pathlib import Path
+from urllib.parse import unquote, urljoin, urlsplit
 
 from .http import NetworkError
 
@@ -13,9 +14,10 @@ def _telegram_failure(method, description):
     """Map Telegram descriptions to fixed diagnostics without logging response text."""
     if method != "sendDocument":
         return "Не удалось выполнить запрос к Telegram.", "request"
-    if "realpath failed" in description or "unsupported url protocol" in description \
-            or "invalid file http url" in description:
-        return "Локальный Telegram API не смог прочитать готовый файл.", "path"
+    if "realpath failed" in description or "stat for file" in description:
+        return "Локальный Telegram API не смог прочитать готовый файл.", "filesystem"
+    if "unsupported url protocol" in description or "invalid file http url" in description:
+        return "Локальный Telegram API не распознал адрес готового файла.", "protocol"
     if "file must be non-empty" in description:
         return "Telegram считает готовый файл пустым.", "empty"
     if "file is too big" in description or "request entity too large" in description:
@@ -49,7 +51,15 @@ class Telegram:
     async def call(self, method, **params):
         try:
             timeout = 30 * 60 if method == "sendDocument" else 40
-            response = await self.client.post(self.base + method, json=params, timeout=timeout)
+            document = params.get("document")
+            if method == "sendDocument" and isinstance(document, str) \
+                    and document.startswith("file://"):
+                path = Path(unquote(urlsplit(document).path))
+                fields = {key: value for key, value in params.items() if key != "document"}
+                response = await self.client.post_file(
+                    self.base + method, fields, "document", path, timeout=timeout)
+            else:
+                response = await self.client.post(self.base + method, json=params, timeout=timeout)
             data = response.json()
         except (NetworkError, ValueError):
             raise APIError("Telegram временно недоступен.") from None

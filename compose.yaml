@@ -20,7 +20,6 @@ services:
         condition: service_completed_successfully
     volumes:
       - telegram-api-data:/var/lib/telegram-bot-api
-      - media-jobs:/jobs:ro
     restart: unless-stopped
     init: true
     tmpfs:

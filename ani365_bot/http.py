@@ -1,9 +1,12 @@
 """Small async JSON HTTP adapter for this sequential, single-user bot."""
 import asyncio
+import http.client
 import json
+import secrets
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
@@ -56,3 +59,65 @@ class HTTPClient:
 
     async def post(self, url, json=None, timeout=40):
         return await asyncio.to_thread(self._request, "POST", url, None, json, timeout)
+
+    def _post_file(self, url, fields, file_field, file_path, timeout):
+        """Stream multipart data without holding the media file in memory."""
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname \
+                or parsed.username or parsed.password:
+            raise NetworkError("Invalid upload URL")
+        path = Path(file_path)
+        try:
+            size = path.stat().st_size
+        except OSError:
+            raise NetworkError("Upload file is unavailable") from None
+
+        boundary = "ani365-" + secrets.token_hex(16)
+        chunks = []
+        for name, value in fields.items():
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            elif isinstance(value, bool):
+                value = "true" if value else "false"
+            header = (f"--{boundary}\r\n"
+                      f"Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").encode()
+            chunks.append(header + str(value).encode("utf-8") + b"\r\n")
+        file_header = (f"--{boundary}\r\n"
+                       f"Content-Disposition: form-data; name=\"{file_field}\"; "
+                       f"filename=\"{path.name}\"\r\n"
+                       "Content-Type: video/x-matroska\r\n\r\n").encode("ascii")
+        ending = f"\r\n--{boundary}--\r\n".encode()
+        content_length = sum(map(len, chunks)) + len(file_header) + size + len(ending)
+        target = parsed.path or "/"
+        if parsed.query:
+            target += "?" + parsed.query
+        connection_type = (http.client.HTTPSConnection if parsed.scheme == "https"
+                           else http.client.HTTPConnection)
+        connection = connection_type(parsed.hostname, parsed.port, timeout=timeout)
+        try:
+            connection.putrequest("POST", target)
+            connection.putheader("User-Agent", "ani365-bot/0.1")
+            connection.putheader("Accept", "application/json")
+            connection.putheader("Content-Type", f"multipart/form-data; boundary={boundary}")
+            connection.putheader("Content-Length", str(content_length))
+            connection.endheaders()
+            for chunk in chunks:
+                connection.send(chunk)
+            connection.send(file_header)
+            with path.open("rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    connection.send(chunk)
+            connection.send(ending)
+            response = connection.getresponse()
+            body = response.read(8 * 1024 * 1024 + 1)
+            if len(body) > 8 * 1024 * 1024:
+                raise NetworkError("Response exceeds the size limit")
+            return Response(response.status, body)
+        except (OSError, http.client.HTTPException):
+            raise NetworkError("File upload failed") from None
+        finally:
+            connection.close()
+
+    async def post_file(self, url, fields, file_field, file_path, timeout=40):
+        return await asyncio.to_thread(
+            self._post_file, url, fields, file_field, file_path, timeout)

@@ -138,8 +138,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         upload = [p for m, p in self.telegram.calls if m == "sendDocument"][-1]
         self.assertIn("720p", upload["caption"])
         self.assertIn("Тип просмотра: Субтитры · Русский", upload["caption"])
-        self.assertTrue(upload["document"].startswith("/"))
-        self.assertNotIn("file://", upload["document"])
+        self.assertTrue(upload["document"].startswith("file:///"))
         self.anime.media_source.assert_awaited_once_with(3, 720, "saved")
         self.assertEqual(self.media.calls[0][2:], (True, "ru"))
         self.assertIn(("deleteMessage", {"chat_id": 42, "message_id": first_id}), self.telegram.calls)
