@@ -1,8 +1,28 @@
 import asyncio
+import logging
 from dataclasses import dataclass
 from urllib.parse import urljoin
 
 from .http import NetworkError
+
+
+LOG = logging.getLogger(__name__)
+
+
+def _telegram_failure(method, description):
+    """Map Telegram descriptions to fixed diagnostics without logging response text."""
+    if method != "sendDocument":
+        return "Не удалось выполнить запрос к Telegram.", "request"
+    if "realpath failed" in description or "unsupported url protocol" in description \
+            or "invalid file http url" in description:
+        return "Локальный Telegram API не смог прочитать готовый файл.", "path"
+    if "file must be non-empty" in description:
+        return "Telegram считает готовый файл пустым.", "empty"
+    if "file is too big" in description or "request entity too large" in description:
+        return "Готовый файл превышает лимит Telegram 2000 МБ.", "size"
+    if "wrong file identifier" in description:
+        return "Telegram не распознал путь к готовому файлу.", "identifier"
+    return "Telegram не принял готовый файл.", "unknown"
 
 
 class APIError(Exception):
@@ -39,7 +59,9 @@ class Telegram:
             code = data.get("error_code", response.status_code)
             description = str(data.get("description", "")).lower()
             retry = data.get("parameters", {}).get("retry_after", 0)
-            raise APIError("Не удалось выполнить запрос к Telegram.", code, retry,
+            message, reason = _telegram_failure(method, description)
+            LOG.warning("Telegram method %s failed (code=%s, reason=%s)", method, code, reason)
+            raise APIError(message, code, retry,
                            missing="message to delete not found" in description)
         return data.get("result")
 

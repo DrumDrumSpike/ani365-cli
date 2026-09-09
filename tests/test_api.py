@@ -57,6 +57,20 @@ class APITests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret", str(raised.exception))
         self.assertEqual(raised.exception.retry_after, 15)
 
+    async def test_telegram_file_error_is_safely_classified(self):
+        client = AsyncMock()
+        client.post.return_value = response({
+            "ok": False,
+            "error_code": 400,
+            "description": "Bad Request: realpath failed for /jobs/private-title.mkv",
+        })
+        with self.assertLogs("ani365_bot.api", level="WARNING") as logs:
+            with self.assertRaises(APIError) as raised:
+                await Telegram(client, "secret:token").call("sendDocument")
+        self.assertIn("не смог прочитать", str(raised.exception))
+        self.assertIn("reason=path", " ".join(logs.output))
+        self.assertNotIn("private-title", " ".join(logs.output))
+
     async def test_invalid_api_json_and_missing_data(self):
         client = AsyncMock()
         for value in (Response(200, b"<html>error</html>"), response({"error": "no data"})):

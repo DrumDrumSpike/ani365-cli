@@ -334,7 +334,7 @@ class Bot:
                                              text=summary + "\n\nОтправляю файл…",
                                              reply_markup={"inline_keyboard": []})
                     await self.telegram.call("sendDocument", chat_id=self.config.owner_id,
-                                             document=path.as_uri(), caption=shortened(summary, 1024))
+                                             document=str(path.resolve()), caption=shortened(summary, 1024))
             finally:
                 heartbeat.cancel()
                 try:
