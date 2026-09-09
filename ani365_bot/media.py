@@ -1,5 +1,6 @@
 """Ephemeral media download and stream-copy MKV assembly."""
 import asyncio
+import logging
 import os
 import re
 import shutil
@@ -13,6 +14,7 @@ from urllib.request import Request, urlopen
 
 MAX_TELEGRAM_FILE = 1_990_000_000
 MAX_SUBTITLE_FILE = 64 * 1024 * 1024
+LOG = logging.getLogger(__name__)
 
 
 class MediaError(Exception):
@@ -27,19 +29,34 @@ def _safe_url(value):
             and parsed.username is None and parsed.password is None)
 
 
+def _safe_diagnostic(value):
+    """Keep tool diagnostics useful without persisting signed media URLs."""
+    value = re.sub(r"(?i)\b(?:https?|file)://[^\s'\"<>]+", "<url>", value)
+    value = re.sub(r"/jobs/job-[^\s:'\"]+", "<media>", value)
+    value = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", value)
+    return " | ".join(line.strip() for line in value.splitlines() if line.strip())[-2000:]
+
+
 async def _run(*args):
+    tool = Path(args[0]).name
     try:
         process = await asyncio.create_subprocess_exec(
-            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     except OSError:
+        LOG.error("Media tool %s could not be started", tool)
         raise MediaError("На сервере не найдена программа для обработки видео.") from None
     try:
-        stdout, _ = await process.communicate()
+        stdout, stderr = await process.communicate()
     except asyncio.CancelledError:
         process.kill()
         await process.wait()
         raise
     if process.returncode:
+        diagnostic = _safe_diagnostic(stderr.decode(errors="replace"))
+        if diagnostic:
+            LOG.warning("Media tool %s failed (exit %s): %s", tool, process.returncode, diagnostic)
+        else:
+            LOG.warning("Media tool %s failed (exit %s) without diagnostics", tool, process.returncode)
         raise MediaError("Не удалось скачать или собрать видео. Попробуй другой перевод или качество.")
     return stdout.decode(errors="replace").strip()
 
@@ -83,7 +100,11 @@ class MediaProcessor:
                     target.write(chunk)
         except MediaError:
             raise
-        except (OSError, HTTPError, URLError):
+        except HTTPError as exc:
+            LOG.warning("Subtitle download failed (HTTP %s)", exc.code)
+            raise MediaError("Не удалось скачать субтитры для выбранного перевода.") from None
+        except (OSError, URLError) as exc:
+            LOG.warning("Subtitle download failed (%s)", type(exc).__name__)
             raise MediaError("Не удалось скачать субтитры для выбранного перевода.") from None
 
     async def _download_video(self, urls, directory):

@@ -2,13 +2,27 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from ani365_bot.api import MediaSource
-from ani365_bot.media import MediaError, MediaProcessor
+from ani365_bot.media import MediaError, MediaProcessor, _run
 
 
 class MediaTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_tool_logs_stage_and_code_but_scrubs_signed_url(self):
+        process = AsyncMock()
+        process.returncode = 7
+        process.communicate.return_value = (
+            b"", b"download failed for https://cdn.example/video?token=very-secret\nsecond line")
+        with patch("ani365_bot.media.asyncio.create_subprocess_exec", return_value=process):
+            with self.assertLogs("ani365_bot.media", level="WARNING") as logs:
+                with self.assertRaises(MediaError):
+                    await _run("yt-dlp", "https://cdn.example/video?token=very-secret")
+        message = " ".join(logs.output)
+        self.assertIn("yt-dlp failed (exit 7)", message)
+        self.assertIn("<url>", message)
+        self.assertNotIn("very-secret", message)
+
     async def test_prepare_muxes_subtitle_and_always_removes_job(self):
         with tempfile.TemporaryDirectory() as temporary:
             processor = MediaProcessor(temporary)
