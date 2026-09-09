@@ -8,6 +8,7 @@ from .bot import Bot
 from .config import Config, ConfigError
 from .store import StateError, Store
 from .http import HTTPClient
+from .media import MediaProcessor
 
 
 async def main():
@@ -19,7 +20,11 @@ async def main():
         # Fail before polling if the saved credential cannot be decrypted.
         store.token(config.owner_id)
         client = HTTPClient()
-        bot = Bot(config, store, Telegram(client, config.bot_token), Anime365(client, config.anime_url))
+        media = MediaProcessor(config.media_dir)
+        # No media task can still be active when this process has just started.
+        media.cleanup_stale(age=0)
+        bot = Bot(config, store, Telegram(client, config.bot_token, config.telegram_url),
+                  Anime365(client, config.anime_url), media)
         task = asyncio.create_task(bot.run())
         for sig in (signal.SIGTERM, signal.SIGINT):
             asyncio.get_running_loop().add_signal_handler(sig, task.cancel)

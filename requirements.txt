@@ -1,1 +1,2 @@
 cryptography==46.0.5
+yt-dlp==2026.8.19

@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from ani365_bot.api import APIError, Anime365, Telegram, qualities
+from ani365_bot.api import APIError, Anime365, Telegram, media_source, qualities
 from ani365_bot.config import Config
 from ani365_bot.http import HTTPClient, NetworkError, NoRedirects, Response
 from ani365_bot.store import Store
@@ -86,6 +86,14 @@ class ShapeTests(unittest.TestCase):
             self.assertEqual(qualities(data), [1080, 720])
         self.assertEqual(qualities({"data": {"stream": [{"height": 480, "url": "/video"}]}}), [480])
         self.assertEqual(qualities({}), [])
+
+    def test_selected_media_urls_and_subtitles_are_resolved_only_on_completion(self):
+        data = {"streams": [{"height": 1080, "urls": ["//cdn.example/video.m3u8"]},
+                            {"height": 720, "url": "/720.mp4"}],
+                "subtitles": {"url": "/subtitles.ass"}}
+        source = media_source(data, 1080, "https://smotret-anime.app")
+        self.assertEqual(source.urls, ("https://cdn.example/video.m3u8",))
+        self.assertEqual(source.subtitle_url, "https://smotret-anime.app/subtitles.ass")
 
     def test_config_accepts_existing_env_names_without_api_id(self):
         with patch.dict(os.environ, {"token_BotFather": "fake:token", "TELEGRAM_ID": "42"}, clear=True):

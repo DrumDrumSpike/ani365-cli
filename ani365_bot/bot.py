@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from .api import APIError, title
 from .config import ConfigError
 from .translations import group_translations
+from .media import MediaError
 
 LOG = logging.getLogger(__name__)
 PAGE_SIZE = 8
@@ -27,6 +28,15 @@ def menu_title(item):
     # Only pathological titles need shortening; preserve the season at the end.
     return (encoded[:2400 * 2].decode("utf-16-le", errors="ignore") + "…" +
             encoded[-599 * 2:].decode("utf-16-le", errors="ignore"))
+
+
+def shortened(text, limit):
+    encoded = text.encode("utf-16-le")
+    if len(encoded) <= limit * 2:
+        return text
+    tail = limit // 3
+    return (encoded[:(limit - tail - 1) * 2].decode("utf-16-le", errors="ignore") + "…" +
+            encoded[-tail * 2:].decode("utf-16-le", errors="ignore"))
 
 
 def series_entry(item, index):
@@ -69,9 +79,10 @@ class Session:
 
 
 class Bot:
-    def __init__(self, config, store, telegram, anime):
+    def __init__(self, config, store, telegram, anime, media=None):
         self.config, self.store = config, store
         self.telegram, self.anime = telegram, anime
+        self.media = media
         self.session = None
 
     @property
@@ -83,6 +94,11 @@ class Bot:
         temporary = self.config.data_dir / "status.tmp"
         temporary.write_text(json.dumps(status))
         temporary.replace(self.config.data_dir / "status.json")
+
+    async def busy_heartbeat(self):
+        while True:
+            self.heartbeat()
+            await asyncio.sleep(30)
 
     async def cleanup(self, all_messages=False):
         for chat_id, message_id, created in self.store.due(all_messages):
@@ -131,7 +147,7 @@ class Bot:
                 await self.on_callback(callback)
             elif message:
                 await self.on_message(message)
-        except APIError as exc:
+        except (APIError, MediaError) as exc:
             # Never log updates, exception tracebacks, requests or remote response bodies.
             LOG.warning("Request failed (code %s)", exc.code)
             await self.reset()
@@ -165,7 +181,7 @@ class Bot:
             else:
                 self.store.set("awaiting_token", "0")
                 await self.notice("Напиши название аниме, затем выбери серию, тип просмотра, перевод и качество.\n"
-                                  "Скачивание и отправка MKV пока не подключены.\n"
+                                  "После выбора качества я соберу и отправлю MKV.\n"
                                   "/auth — заменить токен; /logout — удалить токен; /cancel — очистить меню.", MENU_TTL)
             return
         if command:
@@ -292,15 +308,40 @@ class Bot:
         if session.stage == "qualities":
             selected = session.selected
             group = selected["translation_types"]
-            text = (f"{menu_title(selected['series'])}\n"
-                    f"Серия: {episode_label(selected['episodes'])}\n"
-                    f"Тип просмотра: {group.label}\n"
-                    f"{group.selection_label}: {translation_label(selected['translations'])[:200]}\n"
-                    f"Качество: {item}p · Формат: MKV\n\n"
-                    "Выбор завершён. Скачивание и отправка файла пока не подключены.\n"
-                    "Это сообщение исчезнет через минуту.")
+            if self.media is None:
+                raise MediaError("Скачивание на этом экземпляре бота не настроено.")
+            summary = (f"{shortened(menu_title(selected['series']), 500)}\n"
+                       f"Серия: {episode_label(selected['episodes'])}\n"
+                       f"Тип просмотра: {group.label}\n"
+                       f"{group.selection_label}: {translation_label(selected['translations'])[:200]}\n"
+                       f"Качество: {item}p · Формат: MKV")
+            await self.telegram.call("editMessageText", chat_id=self.config.owner_id,
+                                     message_id=session.message_id,
+                                     text=summary + "\n\nСкачиваю и собираю файл…",
+                                     reply_markup={"inline_keyboard": []})
+            session.touched = time.time()
+            token = self.store.token(self.config.owner_id)
+            if not token:
+                raise APIError("Сначала подключи Anime365: /start.")
+            heartbeat = asyncio.create_task(self.busy_heartbeat())
+            try:
+                source = await self.anime.media_source(selected["translations"]["id"], item, token)
+                filename = self.media.filename(menu_title(selected["series"]),
+                                               episode_label(selected["episodes"]), item)
+                async with self.media.prepare(source, filename, group.kind == "sub", group.language) as path:
+                    await self.telegram.call("editMessageText", chat_id=self.config.owner_id,
+                                             message_id=session.message_id,
+                                             text=summary + "\n\nОтправляю файл…",
+                                             reply_markup={"inline_keyboard": []})
+                    await self.telegram.call("sendDocument", chat_id=self.config.owner_id,
+                                             document=path.as_uri(), caption=shortened(summary, 1024))
+            finally:
+                heartbeat.cancel()
+                try:
+                    await heartbeat
+                except asyncio.CancelledError:
+                    pass
             await self.reset()
-            await self.notice(text)
             return
         if session.stage == "series":
             rows, stage = await self.anime.episodes(item["id"]), "episodes"
@@ -333,7 +374,7 @@ class Bot:
         if webhook.get("url"):
             raise ConfigError("A webhook is already configured for this bot; remove it before using polling")
         await self.cleanup(all_messages=True)
-        LOG.info("Bot started; media downloads are disabled")
+        LOG.info("Bot started; MKV downloads are enabled")
         while True:
             if self.session and time.time() - self.session.touched >= MENU_TTL:
                 await self.reset()

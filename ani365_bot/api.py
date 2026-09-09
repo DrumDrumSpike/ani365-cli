@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 from urllib.parse import urljoin
 
 from .http import NetworkError
@@ -14,14 +15,21 @@ class APIError(Exception):
         self.missing = missing
 
 
+@dataclass(frozen=True)
+class MediaSource:
+    urls: tuple[str, ...]
+    subtitle_url: str | None
+
+
 class Telegram:
-    def __init__(self, client, token):
+    def __init__(self, client, token, base="https://api.telegram.org"):
         self.client = client
-        self.base = f"https://api.telegram.org/bot{token}/"
+        self.base = f"{base.rstrip('/')}/bot{token}/"
 
     async def call(self, method, **params):
         try:
-            response = await self.client.post(self.base + method, json=params, timeout=40)
+            timeout = 30 * 60 if method == "sendDocument" else 40
+            response = await self.client.post(self.base + method, json=params, timeout=timeout)
             data = response.json()
         except (NetworkError, ValueError):
             raise APIError("Telegram временно недоступен.") from None
@@ -49,17 +57,24 @@ def number(value):
         return 0
 
 
-def qualities(data):
-    """Compatibility with the embed variants already handled by the CLI.
-
-    Return only quality labels: signed media URLs must not enter sessions or DB.
-    """
+def _embed(data):
     if not isinstance(data, dict):
         raise APIError("Anime365 вернул неизвестный формат видео.")
     nested = data.get("data") if isinstance(data.get("data"), dict) else {}
     streams = data.get("stream") or data.get("streams") or nested.get("stream") or nested.get("streams") or []
     if not isinstance(streams, list):
         raise APIError("Anime365 вернул неизвестный формат видео.")
+    return nested, streams
+
+
+def _height(stream):
+    value = str(stream.get("height") or stream.get("quality") or "").removesuffix("p")
+    return int(value) if value.isdigit() and int(value) > 0 else 0
+
+
+def qualities(data):
+    """Return labels only, so signed media URLs never enter a menu session or SQLite."""
+    _, streams = _embed(data)
     result = set()
     for stream in streams:
         if not isinstance(stream, dict):
@@ -67,10 +82,32 @@ def qualities(data):
         urls = stream.get("urls") or stream.get("urlList") or stream.get("url")
         if not urls:
             continue
-        height = str(stream.get("height") or stream.get("quality") or "").removesuffix("p")
-        if height.isdigit() and int(height) > 0:
-            result.add(int(height))
+        height = _height(stream)
+        if height:
+            result.add(height)
     return sorted(result, reverse=True)
+
+
+def media_source(data, quality, origin):
+    nested, streams = _embed(data)
+    candidates = []
+    for stream in streams:
+        if not isinstance(stream, dict) or _height(stream) != int(quality):
+            continue
+        values = stream.get("urls") or stream.get("urlList") or stream.get("url") or []
+        if isinstance(values, str):
+            values = [values]
+        for value in values:
+            if isinstance(value, str) and value.strip():
+                candidates.append(urljoin(origin.rstrip("/") + "/", value.strip()))
+    if not candidates:
+        raise APIError("Выбранное качество больше недоступно. Выбери перевод заново.")
+    subtitles = data.get("subtitlesUrl") or nested.get("subtitlesUrl")
+    if not subtitles:
+        block = data.get("subtitles") or nested.get("subtitles") or {}
+        subtitles = block.get("url") if isinstance(block, dict) else None
+    subtitle_url = urljoin(origin.rstrip("/") + "/", subtitles) if isinstance(subtitles, str) and subtitles else None
+    return MediaSource(tuple(dict.fromkeys(candidates)), subtitle_url)
 
 
 class Anime365:
@@ -150,3 +187,8 @@ class Anime365:
 
     async def available_qualities(self, translation_id, token):
         return qualities(await self.get(f"translations/embed/{int(translation_id)}", token))
+
+    async def media_source(self, translation_id, quality, token):
+        data = await self.get(f"translations/embed/{int(translation_id)}", token)
+        origin = f"{urljoin(self.base, '/').rstrip('/')}"
+        return media_source(data, quality, origin)

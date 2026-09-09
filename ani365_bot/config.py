@@ -14,6 +14,8 @@ class Config:
     owner_id: int
     data_dir: Path = Path("data")
     anime_url: str = "https://smotret-anime.app/api"
+    telegram_url: str = "http://telegram-bot-api:8081"
+    media_dir: Path = Path("/jobs")
 
     @classmethod
     def from_env(cls):
@@ -28,4 +30,10 @@ class Config:
         parsed = urlsplit(url)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.query or parsed.fragment:
             raise ConfigError("ANI365_BASE_URL must be an HTTPS API base URL")
-        return cls(token.strip(), int(owner), Path(os.environ.get("DATA_DIR", "data")), url)
+        telegram_url = os.environ.get("TELEGRAM_BOT_API_URL", cls.telegram_url).rstrip("/")
+        telegram = urlsplit(telegram_url)
+        if (telegram.scheme not in ("http", "https") or not telegram.hostname or telegram.username
+                or telegram.query or telegram.fragment):
+            raise ConfigError("TELEGRAM_BOT_API_URL must be an HTTP(S) base URL")
+        return cls(token.strip(), int(owner), Path(os.environ.get("DATA_DIR", "data")), url,
+                   telegram_url, Path(os.environ.get("MEDIA_DIR", "/jobs")))
