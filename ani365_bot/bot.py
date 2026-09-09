@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 from .api import APIError, title
 from .config import ConfigError
+from .translations import group_translations
 
 LOG = logging.getLogger(__name__)
 PAGE_SIZE = 8
@@ -39,7 +40,7 @@ def episode_label(item):
 
 
 def translation_label(item):
-    return f"{item.get('typeLang') or item.get('type') or 'sub'} · {item.get('authorsSummary') or item.get('title') or 'Без названия'}"
+    return f"{item.get('typeLang') or item.get('type') or '?'} · {item.get('authorsSummary') or item.get('title') or 'Без названия'}"
 
 
 @dataclass
@@ -163,7 +164,7 @@ class Bot:
                 await self.request_auth()
             else:
                 self.store.set("awaiting_token", "0")
-                await self.notice("Напиши название аниме, затем выбери серию, субтитры и качество.\n"
+                await self.notice("Напиши название аниме, затем выбери серию, тип просмотра, перевод и качество.\n"
                                   "Скачивание и отправка MKV пока не подключены.\n"
                                   "/auth — заменить токен; /logout — удалить токен; /cancel — очистить меню.", MENU_TTL)
             return
@@ -198,8 +199,14 @@ class Bot:
     def menu(self):
         session = self.session
         headings = {"series": "Выбери аниме", "episodes": "Выбери серию",
-                    "translations": "Выбери субтитры", "qualities": "Выбери качество"}
+                    "translation_types": "Выбери тип просмотра",
+                    "translations": "Выбери перевод", "qualities": "Выбери качество"}
         heading = headings[session.stage]
+        group = session.selected.get("translation_types")
+        if group:
+            if session.stage == "translations":
+                heading = group.prompt
+            heading = f"{group.label}\n{heading}"
         if "series" in session.selected:
             heading = f"{menu_title(session.selected['series'])}\n{heading}"
         pages = session.pages()
@@ -217,6 +224,8 @@ class Bot:
                 continue
             elif session.stage == "episodes":
                 label = episode_label(item)
+            elif session.stage == "translation_types":
+                label = item.label
             elif session.stage == "translations":
                 label = translation_label(item)
             else:
@@ -282,9 +291,11 @@ class Bot:
         session = self.session
         if session.stage == "qualities":
             selected = session.selected
+            group = selected["translation_types"]
             text = (f"{menu_title(selected['series'])}\n"
                     f"Серия: {episode_label(selected['episodes'])}\n"
-                    f"Субтитры: {translation_label(selected['translations'])[:200]}\n"
+                    f"Тип просмотра: {group.label}\n"
+                    f"{group.selection_label}: {translation_label(selected['translations'])[:200]}\n"
                     f"Качество: {item}p · Формат: MKV\n\n"
                     "Выбор завершён. Скачивание и отправка файла пока не подключены.\n"
                     "Это сообщение исчезнет через минуту.")
@@ -295,8 +306,12 @@ class Bot:
             rows, stage = await self.anime.episodes(item["id"]), "episodes"
             empty = "У этого аниме нет доступных серий. Выбери другое."
         elif session.stage == "episodes":
-            rows, stage = await self.anime.translations(item["id"]), "translations"
-            empty = "Для этой серии нет доступных субтитров. Выбери другую."
+            rows = group_translations(await self.anime.translations(item["id"]))
+            stage = "translation_types"
+            empty = "Для этой серии нет доступных переводов или оригинала. Выбери другую."
+        elif session.stage == "translation_types":
+            rows, stage = item.translations, "translations"
+            empty = "Для этого типа просмотра нет доступных вариантов. Выбери другой."
         else:
             token = self.store.token(self.config.owner_id)
             if not token:

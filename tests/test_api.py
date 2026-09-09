@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from ani365_bot.api import APIError, Anime365, Telegram, qualities, subtitle_translation
+from ani365_bot.api import APIError, Anime365, Telegram, qualities
 from ani365_bot.config import Config
 from ani365_bot.http import HTTPClient, NetworkError, NoRedirects, Response
 from ani365_bot.store import Store
@@ -64,6 +64,18 @@ class APITests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(APIError):
                 await Anime365(client, "https://example.org/api").validate("secret")
 
+    async def test_translations_include_voice_raw_and_other_languages(self):
+        rows = [{"id": i, "type": kind, "priority": i} for i, kind in
+                enumerate(("subRu", "voiceRu", "raw", "subEn", "voiceEn", "subDe"), 1)]
+        client = AsyncMock()
+        client.get.return_value = response({"data": rows})
+        result = await Anime365(client, "https://example.org/api").translations(42)
+        self.assertEqual({x["id"] for x in result}, {1, 2, 3, 4, 5, 6})
+        params = client.get.call_args.kwargs["params"]
+        self.assertEqual(params["episodeId"], 42)
+        self.assertEqual(params["isActive"], 1)
+        self.assertNotIn("type", params)
+
 
 class ShapeTests(unittest.TestCase):
     def test_embed_variants_deduplicate_qualities_and_discard_urls(self):
@@ -74,12 +86,6 @@ class ShapeTests(unittest.TestCase):
             self.assertEqual(qualities(data), [1080, 720])
         self.assertEqual(qualities({"data": {"stream": [{"height": 480, "url": "/video"}]}}), [480])
         self.assertEqual(qualities({}), [])
-
-    def test_filters_out_voice_translations(self):
-        self.assertTrue(subtitle_translation({"typeKind": "sub"}))
-        self.assertTrue(subtitle_translation({"type": "subRu"}))
-        self.assertFalse(subtitle_translation({"type": "voiceRu"}))
-        self.assertFalse(subtitle_translation({}))
 
     def test_config_accepts_existing_env_names_without_api_id(self):
         with patch.dict(os.environ, {"token_BotFather": "fake:token", "TELEGRAM_ID": "42"}, clear=True):

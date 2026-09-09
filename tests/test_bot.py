@@ -96,7 +96,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.store.save_token(42, "saved")
         self.anime.search.return_value = [{"id": 1, "titles": {"ru": "Аниме"}, "year": 2024}]
         self.anime.episodes.return_value = [{"id": 2, "episodeFull": "1", "episodeType": "tv"}]
-        self.anime.translations.return_value = [{"id": 3, "authorsSummary": "Переводчик", "typeLang": "ru"}]
+        self.anime.translations.return_value = [{"id": 3, "authorsSummary": "Переводчик", "type": "subRu", "typeLang": "ru"}]
         self.anime.available_qualities.return_value = [1080, 720]
         await self.bot.handle(self.message("Аниме"))
         first_id = self.bot.session.message_id
@@ -104,7 +104,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.session.stage, "episodes")
         await self.bot.handle(self.callback("back"))
         self.assertEqual(self.bot.session.stage, "series")
-        for _ in range(3):
+        for _ in range(4):
             await self.bot.handle(self.callback())
         self.assertEqual(self.bot.session.stage, "qualities")
         self.assertEqual(self.bot.session.message_id, first_id)
@@ -113,6 +113,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.bot.session)
         notices = [p["text"] for m, p in self.telegram.calls if m == "sendMessage"]
         self.assertIn("720p", notices[-1])
+        self.assertIn("Тип просмотра: Субтитры · Русский", notices[-1])
         self.assertIn("пока не подключены", notices[-1])
         self.assertIn(("deleteMessage", {"chat_id": 42, "message_id": first_id}), self.telegram.calls)
         self.assertFalse(any(method in ("sendDocument", "sendVideo") for method, _ in self.telegram.calls))
@@ -136,6 +137,86 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.anime.translations.return_value = []
         await self.bot.render()
         await self.bot.handle(self.callback())
+        self.assertEqual(self.bot.session.stage, "episodes")
+
+    async def test_switching_viewing_type_filters_studios_and_discards_old_choice(self):
+        self.store.save_token(42, "saved")
+        self.bot.session = Session("episodes", [{"id": 2, "episodeFull": "1"}],
+                                   selected={"series": {"id": 1, "titles": {"ru": "Аниме"}}})
+        self.anime.translations.return_value = [
+            {"id": 10, "type": "voiceRu", "authorsSummary": "Русская студия"},
+            {"id": 11, "type": "subEn", "authorsSummary": "English team"},
+            {"id": 12, "type": "voiceRu", "authorsSummary": "Другая студия"},
+            {"id": 13, "type": "raw", "authorsSummary": "Original"},
+        ]
+        self.anime.available_qualities.return_value = [1080]
+        await self.bot.render()
+        menu_id = self.bot.session.message_id
+        await self.bot.handle(self.callback())
+        self.assertEqual(self.bot.session.stage, "translation_types")
+        self.assertEqual([g.label for g in self.bot.session.items],
+                         ["Озвучка · Русский", "Субтитры · Английский", "Оригинал (RAW)"])
+        stale_type_callback = self.callback(index=1)
+        await self.bot.handle(self.callback())
+        self.assertEqual([t["id"] for t in self.bot.session.items], [10, 12])
+        self.assertIn("Выбери озвучку", self.bot.menu()[0])
+        await self.bot.handle(stale_type_callback)
+        self.assertEqual(self.bot.session.stage, "translations")
+        await self.bot.handle(self.callback(index=1))
+        self.anime.available_qualities.assert_awaited_once_with(12, "saved")
+        await self.bot.handle(self.callback("back"))
+        await self.bot.handle(self.callback("back"))
+        self.assertEqual(self.bot.session.stage, "translation_types")
+        self.assertNotIn("translation_types", self.bot.session.selected)
+        self.assertNotIn("translations", self.bot.session.selected)
+        await self.bot.handle(self.callback(index=1))
+        self.assertEqual([t["id"] for t in self.bot.session.items], [11])
+        await self.bot.handle(self.callback())
+        self.anime.available_qualities.assert_awaited_with(11, "saved")
+        self.assertEqual(self.bot.session.message_id, menu_id)
+        # Fetch once per episode, then filter locally when changing types.
+        self.anime.translations.assert_awaited_once_with(2)
+        await self.bot.handle(self.callback())
+        notice = [p["text"] for m, p in self.telegram.calls if m == "sendMessage"][-1]
+        self.assertIn("Тип просмотра: Субтитры · Английский", notice)
+        self.assertIn("English team", notice)
+        self.assertNotIn("Другая студия", notice)
+
+    async def test_raw_only_episode_reaches_quality_and_has_correct_summary(self):
+        self.store.save_token(42, "saved")
+        self.bot.session = Session("episodes", [{"id": 2, "episodeFull": "1"}],
+                                   selected={"series": {"id": 1, "titles": {"ru": "Аниме"}}})
+        self.anime.translations.return_value = [{"id": 20, "type": "raw", "typeKind": "raw",
+                                                "typeLang": "ja", "title": "Original"}]
+        self.anime.available_qualities.return_value = [1440, 1080]
+        await self.bot.render()
+        await self.bot.handle(self.callback())
+        self.assertEqual(self.bot.session.items[0].label, "Оригинал (RAW)")
+        await self.bot.handle(self.callback())
+        self.assertIn("Выбери версию оригинала", self.bot.menu()[0])
+        await self.bot.handle(self.callback())
+        await self.bot.handle(self.callback())
+        notice = [p["text"] for m, p in self.telegram.calls if m == "sendMessage"][-1]
+        self.assertIn("Тип просмотра: Оригинал (RAW)", notice)
+        self.assertIn("Версия: ja · Original", notice)
+        self.assertIn("1440p", notice)
+        self.assertNotIn("Субтитры:", notice)
+        self.assertIsNone(self.bot.session)
+
+    async def test_viewing_types_paginate_and_back_returns_to_episode(self):
+        self.bot.session = Session("episodes", [{"id": 2}])
+        self.anime.translations.return_value = [{"id": i, "typeKind": "sub", "typeLang": f"lang{i}"}
+                                               for i in range(12)]
+        await self.bot.render()
+        await self.bot.handle(self.callback())
+        self.assertEqual(len(self.bot.session.pages()), 2)
+        await self.bot.handle(self.callback("page", 1))
+        chosen = self.bot.session.items[8]
+        await self.bot.handle(self.callback(index=8))
+        self.assertEqual(self.bot.session.items, chosen.translations)
+        await self.bot.handle(self.callback("back"))
+        self.assertEqual(self.bot.session.page, 1)
+        await self.bot.handle(self.callback("back"))
         self.assertEqual(self.bot.session.stage, "episodes")
 
     async def test_failed_delete_is_retried_and_does_not_claim_success(self):

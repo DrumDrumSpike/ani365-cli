@@ -49,12 +49,6 @@ def number(value):
         return 0
 
 
-def subtitle_translation(item):
-    kind = str(item.get("typeKind") or "").lower()
-    raw_type = str(item.get("type") or "").lower()
-    return kind in ("sub", "subtitles") or (not kind and raw_type.startswith("sub"))
-
-
 def qualities(data):
     """Compatibility with the embed variants already handled by the CLI.
 
@@ -151,7 +145,7 @@ class Anime365:
     async def translations(self, episode_id):
         rows = await self.listing("translations", episodeId=episode_id, isActive=1,
                                   fields="id,title,type,typeKind,typeLang,authorsSummary,priority,height")
-        return sorted((x for x in rows if subtitle_translation(x)),
+        return sorted(rows,
                       key=lambda x: (str(x.get("typeLang") or "").lower() != "ru", -number(x.get("priority"))))
 
     async def available_qualities(self, translation_id, token):
