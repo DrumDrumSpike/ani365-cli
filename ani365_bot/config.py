@@ -17,6 +17,11 @@ class Config:
     telegram_url: str = "http://telegram-bot-api:8081"
     media_dir: Path = Path("/jobs")
     watch_check_interval: int = 600
+    mini_app_url: str = ""
+    web_cookie_secure: bool = True
+    playback_completion_threshold: float = 0.9
+    download_workers: int = 2
+    download_ttl: int = 24 * 60 * 60
 
     @classmethod
     def from_env(cls):
@@ -43,5 +48,30 @@ class Config:
             raise ConfigError("WATCH_CHECK_INTERVAL must be a positive number of seconds") from None
         if watch_check_interval <= 0:
             raise ConfigError("WATCH_CHECK_INTERVAL must be a positive number of seconds")
+        mini_app_url = os.environ.get("MINI_APP_URL", "").strip().rstrip("/")
+        if mini_app_url:
+            mini = urlsplit(mini_app_url)
+            if (mini.scheme != "https" or not mini.hostname or mini.username or mini.query
+                    or mini.fragment):
+                raise ConfigError("MINI_APP_URL must be an HTTPS URL without credentials or query")
+        threshold = os.environ.get("PLAYBACK_COMPLETION_THRESHOLD", "0.9")
+        try:
+            completion_threshold = float(threshold)
+        except ValueError:
+            raise ConfigError("PLAYBACK_COMPLETION_THRESHOLD must be a number from 0 to 1") from None
+        if not 0 < completion_threshold <= 1:
+            raise ConfigError("PLAYBACK_COMPLETION_THRESHOLD must be a number from 0 to 1")
+        cookie_secure = os.environ.get("WEB_COOKIE_SECURE", "true").strip().lower()
+        if cookie_secure not in ("1", "true", "yes", "0", "false", "no"):
+            raise ConfigError("WEB_COOKIE_SECURE must be true or false")
+        try:
+            download_workers = int(os.environ.get("DOWNLOAD_WORKERS", "2"))
+            download_ttl = int(os.environ.get("DOWNLOAD_TTL", str(24 * 60 * 60)))
+        except ValueError:
+            raise ConfigError("DOWNLOAD_WORKERS and DOWNLOAD_TTL must be positive integers") from None
+        if download_workers <= 0 or download_workers > 8 or download_ttl <= 0:
+            raise ConfigError("DOWNLOAD_WORKERS and DOWNLOAD_TTL must be positive integers")
         return cls(token.strip(), int(owner), Path(os.environ.get("DATA_DIR", "data")), url,
-                   telegram_url, Path(os.environ.get("MEDIA_DIR", "/jobs")), watch_check_interval)
+                   telegram_url, Path(os.environ.get("MEDIA_DIR", "/jobs")), watch_check_interval,
+                   mini_app_url, cookie_secure in ("1", "true", "yes"), completion_threshold,
+                   download_workers, download_ttl)

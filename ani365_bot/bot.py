@@ -200,9 +200,12 @@ class Bot:
             else:
                 self.store.untrack(chat_id, message_id)
 
-    async def notice(self, text, ttl=NOTICE_TTL, user_id=None):
+    async def notice(self, text, ttl=NOTICE_TTL, user_id=None, reply_markup=None):
         user_id = self._user(user_id)
-        message = await self.telegram.call("sendMessage", chat_id=user_id, text=text[:4000])
+        params = {"chat_id": user_id, "text": text[:4000]}
+        if reply_markup:
+            params["reply_markup"] = reply_markup
+        message = await self.telegram.call("sendMessage", **params)
         self.store.track(user_id, message["message_id"], ttl)
 
     async def reset(self, user_id=None):
@@ -334,7 +337,12 @@ class Bot:
                     "/auth — заменить токен; /logout — удалить токен; /cancel — очистить меню.")
                 if user_id == self.config.owner_id:
                     help_text += "\n/allow <id>, /revoke <id>, /users — управление allowlist."
-                await self.notice(help_text, MENU_TTL, user_id)
+                markup = None
+                if self.config.mini_app_url:
+                    markup = {"inline_keyboard": [[{
+                        "text": "Открыть каталог", "web_app": {"url": self.config.mini_app_url}
+                    }]]}
+                await self.notice(help_text, MENU_TTL, user_id, markup)
             return
         if command == "/watching":
             if not self.store.token(user_id):
@@ -832,11 +840,18 @@ class Bot:
                    "episodeFull": notification.get("episode_number")}
         text = (f"Новая серия\n{notification.get('title') or 'Без названия'}\n"
                 f"Серия {episode_number(episode)} {suffix}")
-        keyboard = {"inline_keyboard": [
-            [{"text": "Смотреть серию", "callback_data": self._persistent_callback("e", series_id, episode["id"])}],
+        rows = [[{"text": "Смотреть серию", "callback_data": self._persistent_callback("e", series_id, episode["id"])}]]
+        if self.config.mini_app_url:
+            # Numeric Anime365 identifiers are safe deep-link state. Never put a
+            # credential, signed CDN URL or temporary playback ticket in Telegram.
+            rows.append([{"text": "Смотреть в Mini App", "web_app": {
+                "url": f"{self.config.mini_app_url}?series_id={series_id}&episode_id={episode['id']}"
+            }}])
+        rows.extend([
             [{"text": "Открыть аниме", "callback_data": self._persistent_callback("o", series_id)}],
             [{"text": "Отключить уведомления", "callback_data": self._persistent_callback("d", series_id)}],
-        ]}
+        ])
+        keyboard = {"inline_keyboard": rows}
         await self.telegram.call("sendMessage", chat_id=user_id, text=text[:4000], reply_markup=keyboard)
         return True
 

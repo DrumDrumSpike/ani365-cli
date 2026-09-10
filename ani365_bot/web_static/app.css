@@ -1,0 +1,16 @@
+:root { color-scheme: dark light; font-family: system-ui, sans-serif; background: var(--tg-theme-bg-color, #18222d); color: var(--tg-theme-text-color, #fff); }
+* { box-sizing: border-box; }
+body { margin: 0; padding: env(safe-area-inset-top) 14px env(safe-area-inset-bottom); }
+main { max-width: 720px; margin: auto; }
+h1, h2 { margin: 18px 0 10px; } h1 { font-size: 24px; } h2 { font-size: 19px; }
+.status, .empty { padding: 22px 4px; color: var(--tg-theme-hint-color, #a8b3c0); }
+.grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.card, .panel { background: var(--tg-theme-secondary-bg-color, #243241); border-radius: 14px; padding: 13px; }
+.card button { width: 100%; text-align: left; background: transparent; color: inherit; border: 0; font: inherit; padding: 0; }
+.meta { color: var(--tg-theme-hint-color, #a8b3c0); font-size: 14px; margin-top: 6px; }
+button, input { font: inherit; } button.action { border: 0; border-radius: 10px; padding: 11px 14px; background: var(--tg-theme-button-color, #2ea6ff); color: var(--tg-theme-button-text-color, #fff); margin: 5px 5px 5px 0; }
+button.secondary { background: var(--tg-theme-secondary-bg-color, #243241); color: inherit; }
+.episodes { display: flex; flex-wrap: wrap; gap: 7px; }.episodes button { min-width: 42px; }
+input { width: 100%; padding: 12px; border-radius: 10px; border: 0; margin: 5px 0; }
+video { width: 100%; max-height: 75vh; background: #000; border-radius: 12px; }
+.error { color: #ff8888; white-space: pre-wrap; } .back { margin-top: 12px; }

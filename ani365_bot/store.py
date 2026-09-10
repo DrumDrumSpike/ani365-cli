@@ -6,7 +6,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 
 class StateError(ValueError):
@@ -53,10 +53,18 @@ class Store:
                 os.chmod(key_path, 0o600)
                 f.write(Fernet.generate_key())
         self.cipher = Fernet(key_path.read_bytes().strip())
-        self.db = sqlite3.connect(db_path)
+        # Each production process owns its connection. ``check_same_thread`` is
+        # disabled so an ASGI test server may use this injected Store from its
+        # event-loop thread; SQLite still serializes cross-process writes.
+        self.db = sqlite3.connect(db_path, check_same_thread=False)
         os.chmod(db_path, 0o600)
         self.db.execute("PRAGMA secure_delete = ON")
         self.db.execute("PRAGMA foreign_keys = ON")
+        # The bot and the read-heavy Mini App can run in separate containers.
+        # WAL lets their short transactions coexist without making credentials or
+        # Anime365 responses visible outside this database.
+        self.db.execute("PRAGMA journal_mode = WAL")
+        self.db.execute("PRAGMA busy_timeout = 5000")
         self._migrate()
 
     def _migrate(self):
@@ -72,6 +80,16 @@ class Store:
             with self.db:
                 self._create_v2()
                 self.db.execute("PRAGMA user_version = 2")
+            version = 2
+        if version < 3:
+            with self.db:
+                self._create_v3()
+                self.db.execute("PRAGMA user_version = 3")
+            version = 3
+        if version < 4:
+            with self.db:
+                self._create_v4()
+                self.db.execute("PRAGMA user_version = 4")
 
     def _create_v1(self):
         """Initial schema, kept idempotent for pre-versioned installations."""
@@ -173,6 +191,65 @@ class Store:
         self.db.execute("""
             CREATE INDEX IF NOT EXISTS notification_outbox_pending_idx
             ON notification_outbox(sent_at, retry_at)
+        """)
+
+    def _create_v3(self):
+        """Add resumable Mini App state without changing v1/v2 records.
+
+        A position is deliberately keyed by the local user and watch-list title.
+        It contains numeric playback state only; signed CDN URLs and Anime365
+        credentials never enter this table.
+        """
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS playback_progress (
+                user_id INTEGER NOT NULL,
+                series_id INTEGER NOT NULL,
+                episode_id INTEGER NOT NULL,
+                position_seconds REAL NOT NULL DEFAULT 0 CHECK(position_seconds >= 0),
+                duration_seconds REAL NOT NULL DEFAULT 0 CHECK(duration_seconds >= 0),
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(user_id, series_id),
+                FOREIGN KEY(user_id, series_id)
+                    REFERENCES watchlist(user_id, series_id) ON DELETE CASCADE
+            )
+        """)
+        self.db.execute("""
+            CREATE INDEX IF NOT EXISTS playback_progress_recent_idx
+            ON playback_progress(user_id, updated_at DESC)
+        """)
+
+    def _create_v4(self):
+        """Durable metadata for bounded offline jobs; media files stay on disk."""
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS download_jobs (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                series_id INTEGER NOT NULL,
+                episode_id INTEGER NOT NULL,
+                episode_number TEXT NOT NULL,
+                translation_id INTEGER NOT NULL,
+                quality INTEGER NOT NULL,
+                delivery TEXT NOT NULL CHECK(delivery IN ('browser', 'telegram')),
+                status TEXT NOT NULL CHECK(status IN (
+                    'queued', 'preparing', 'ready', 'sent', 'failed', 'cancelled', 'expired'
+                )),
+                filename TEXT,
+                created_at REAL NOT NULL,
+                started_at REAL,
+                finished_at REAL,
+                expires_at REAL,
+                error_code TEXT,
+                FOREIGN KEY(user_id, series_id)
+                    REFERENCES watchlist(user_id, series_id) ON DELETE CASCADE
+            )
+        """)
+        self.db.execute("""
+            CREATE INDEX IF NOT EXISTS download_jobs_user_idx
+            ON download_jobs(user_id, created_at DESC)
+        """)
+        self.db.execute("""
+            CREATE INDEX IF NOT EXISTS download_jobs_queue_idx
+            ON download_jobs(status, created_at)
         """)
 
     @staticmethod
@@ -419,6 +496,188 @@ class Store:
                 WHERE user_id=? AND series_id=?
             """, (episode_id, episode_number, user_id, series_id))
         return self.get_watchlist(user_id, series_id) if cursor.rowcount else None
+
+    def playback_progress(self, user_id, series_id):
+        """Return one user's resumable position for a saved Anime365 title."""
+        user_id = self._positive_id(user_id, "user_id")
+        series_id = self._positive_id(series_id, "series_id")
+        row = self.db.execute("""
+            SELECT episode_id, position_seconds, duration_seconds, updated_at
+            FROM playback_progress WHERE user_id=? AND series_id=?
+        """, (user_id, series_id)).fetchone()
+        if row is None:
+            return None
+        return dict(zip(("episode_id", "position_seconds", "duration_seconds", "updated_at"), row))
+
+    def record_playback_progress(self, user_id, series_id, episode, position_seconds,
+                                 duration_seconds, episode_number=None, *, ended=False,
+                                 completion_threshold=0.9, now=None):
+        """Persist a bounded resume point and mirror completed episodes to v2 state.
+
+        The caller supplies the episode number from the just-observed Anime365
+        episode list.  This keeps the old bot's ``last_watched_*`` fields fully
+        compatible while the Mini App stores a position inside the current episode.
+        """
+        user_id = self._positive_id(user_id, "user_id")
+        series_id = self._positive_id(series_id, "series_id")
+        episode_id, episode_number = self._episode(episode, episode_number)
+        try:
+            position = max(0.0, float(position_seconds or 0))
+            duration = max(0.0, float(duration_seconds or 0))
+            threshold = min(1.0, max(0.0, float(completion_threshold)))
+        except (TypeError, ValueError):
+            raise ValueError("Playback position must be numeric") from None
+        if duration and position > duration:
+            position = duration
+        completed = bool(ended) or (duration > 0 and position / duration >= threshold)
+        timestamp = self._now(now)
+        with self.db:
+            if not self.has_watchlist(user_id, series_id):
+                return None
+            self.db.execute("""
+                INSERT INTO playback_progress(
+                    user_id, series_id, episode_id, position_seconds, duration_seconds, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, series_id) DO UPDATE SET
+                    episode_id=excluded.episode_id,
+                    position_seconds=excluded.position_seconds,
+                    duration_seconds=excluded.duration_seconds,
+                    updated_at=excluded.updated_at
+            """, (user_id, series_id, episode_id, position, duration, timestamp))
+            if completed:
+                self.db.execute("""
+                    UPDATE watchlist
+                    SET last_watched_episode_id=?, last_watched_episode_number=?
+                    WHERE user_id=? AND series_id=?
+                """, (episode_id, episode_number, user_id, series_id))
+        result = self.playback_progress(user_id, series_id)
+        result["completed"] = completed
+        return result
+
+    def recent_playback(self, user_id, limit=20):
+        """Return private saved titles ordered by the last received player update."""
+        user_id = self._positive_id(user_id, "user_id")
+        limit = max(1, min(100, int(limit)))
+        columns = ", ".join(f"w.{column}" for column in self._WATCHLIST_COLUMNS)
+        rows = self.db.execute(f"""
+            SELECT {columns}, p.episode_id, p.position_seconds, p.duration_seconds,
+                   p.updated_at
+            FROM playback_progress AS p
+            JOIN watchlist AS w ON w.user_id=p.user_id AND w.series_id=p.series_id
+            WHERE p.user_id=? ORDER BY p.updated_at DESC LIMIT ?
+        """, (user_id, limit)).fetchall()
+        result = []
+        for row in rows:
+            item = self._watchlist_dict(row[:len(self._WATCHLIST_COLUMNS)])
+            item["playback"] = dict(zip(
+                ("episode_id", "position_seconds", "duration_seconds", "updated_at"),
+                row[len(self._WATCHLIST_COLUMNS):]))
+            result.append(item)
+        return result
+
+    # Offline jobs persist only identifiers and lifecycle metadata.  The output
+    # is an ephemeral file under MEDIA_DIR/ready-<unguessable-job-id>, never a
+    # signed Anime365 URL or an access token.
+    def create_download_job(self, job_id, user_id, series_id, episode_id, episode_number,
+                            translation_id, quality, delivery, now=None):
+        user_id = self._positive_id(user_id, "user_id")
+        series_id = self._positive_id(series_id, "series_id")
+        episode_id = self._positive_id(episode_id, "episode_id")
+        translation_id = self._positive_id(translation_id, "translation_id")
+        quality = self._positive_id(quality, "quality")
+        if delivery not in ("browser", "telegram"):
+            raise ValueError("Unknown download delivery")
+        if not isinstance(job_id, str) or len(job_id) < 16 or len(job_id) > 128:
+            raise ValueError("Invalid download job id")
+        if not self.has_watchlist(user_id, series_id):
+            return None
+        with self.db:
+            self.db.execute("""
+                INSERT INTO download_jobs(
+                    id, user_id, series_id, episode_id, episode_number, translation_id,
+                    quality, delivery, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)
+            """, (job_id, user_id, series_id, episode_id, str(episode_number or "?"),
+                  translation_id, quality, delivery, self._now(now)))
+        return self.download_job(user_id, job_id)
+
+    def download_job(self, user_id, job_id):
+        user_id = self._positive_id(user_id, "user_id")
+        row = self.db.execute("""
+            SELECT id, user_id, series_id, episode_id, episode_number, translation_id, quality,
+                   delivery, status, filename, created_at, started_at, finished_at, expires_at, error_code
+            FROM download_jobs WHERE id=? AND user_id=?
+        """, (str(job_id), user_id)).fetchone()
+        if row is None:
+            return None
+        keys = ("id", "user_id", "series_id", "episode_id", "episode_number", "translation_id",
+                "quality", "delivery", "status", "filename", "created_at", "started_at",
+                "finished_at", "expires_at", "error_code")
+        return dict(zip(keys, row))
+
+    def list_download_jobs(self, user_id, limit=50):
+        user_id = self._positive_id(user_id, "user_id")
+        limit = max(1, min(100, int(limit)))
+        ids = self.db.execute("SELECT id FROM download_jobs WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+                              (user_id, limit)).fetchall()
+        return [self.download_job(user_id, row[0]) for row in ids]
+
+    def claim_download_job(self, job_id, now=None):
+        """Atomically move exactly one queued job to preparing after a restart."""
+        timestamp = self._now(now)
+        with self.db:
+            cursor = self.db.execute("""
+                UPDATE download_jobs SET status='preparing', started_at=?, error_code=NULL
+                WHERE id=? AND status='queued'
+            """, (timestamp, str(job_id)))
+            if not cursor.rowcount:
+                return None
+            row = self.db.execute("SELECT user_id FROM download_jobs WHERE id=?", (str(job_id),)).fetchone()
+        return self.download_job(row[0], job_id) if row else None
+
+    def queued_download_job_ids(self):
+        return [row[0] for row in self.db.execute(
+            "SELECT id FROM download_jobs WHERE status='queued' ORDER BY created_at"
+        ).fetchall()]
+
+    def cancel_download_job(self, user_id, job_id, now=None):
+        user_id = self._positive_id(user_id, "user_id")
+        with self.db:
+            cursor = self.db.execute("""
+                UPDATE download_jobs SET status='cancelled', finished_at=?
+                WHERE id=? AND user_id=? AND status IN ('queued', 'preparing')
+            """, (self._now(now), str(job_id), user_id))
+        return cursor.rowcount > 0
+
+    def finish_download_job(self, job_id, status, *, filename=None, expires_at=None,
+                            error_code=None, now=None):
+        if status not in ("ready", "sent", "failed", "cancelled"):
+            raise ValueError("Invalid download status")
+        with self.db:
+            self.db.execute("""
+                UPDATE download_jobs
+                SET status=?, filename=?, expires_at=?, error_code=?, finished_at=?
+                WHERE id=? AND status='preparing'
+            """, (status, filename, expires_at, error_code, self._now(now), str(job_id)))
+
+    def reset_interrupted_downloads(self):
+        """A process restart releases workers and makes interrupted jobs retryable."""
+        with self.db:
+            self.db.execute("UPDATE download_jobs SET status='queued', started_at=NULL "
+                            "WHERE status='preparing'")
+
+    def expire_download_jobs(self, now=None):
+        timestamp = self._now(now)
+        with self.db:
+            rows = self.db.execute("""
+                SELECT id, filename FROM download_jobs
+                WHERE status='ready' AND expires_at IS NOT NULL AND expires_at <= ?
+            """, (timestamp,)).fetchall()
+            self.db.execute("""
+                UPDATE download_jobs SET status='expired', filename=NULL
+                WHERE status='ready' AND expires_at IS NOT NULL AND expires_at <= ?
+            """, (timestamp,))
+        return rows
 
     def update_available(self, user_id, series_id, episode, episode_number=None):
         user_id = self._positive_id(user_id, "user_id")

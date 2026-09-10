@@ -1,2 +1,5 @@
 cryptography==46.0.5
 yt-dlp==2026.8.19
+fastapi==0.115.12
+uvicorn==0.34.0
+httpx==0.28.1

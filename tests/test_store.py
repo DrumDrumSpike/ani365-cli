@@ -124,6 +124,20 @@ class StoreTests(unittest.TestCase):
         self.assertFalse(self.store.has_watchlist(1, 10))
         self.assertFalse(self.store.remove_watchlist(1, 10))
 
+    def test_playback_progress_is_private_and_completion_updates_legacy_fields(self):
+        self.store.add_watchlist(1, 10, "One")
+        self.store.add_watchlist(2, 10, "Two")
+        first = self.store.record_playback_progress(1, 10, episode(101, 1), 89, 100,
+                                                    completion_threshold=0.9, now=5)
+        self.assertFalse(first["completed"])
+        self.assertEqual(self.store.playback_progress(2, 10), None)
+        complete = self.store.record_playback_progress(1, 10, episode(101, 1), 90, 100,
+                                                       completion_threshold=0.9, now=6)
+        self.assertTrue(complete["completed"])
+        self.assertEqual(self.store.get_watchlist(1, 10)["last_watched_episode_id"], 101)
+        self.assertEqual(self.store.get_watchlist(2, 10)["last_watched_episode_id"], None)
+        self.assertEqual(self.store.recent_playback(1)[0]["playback"]["episode_id"], 101)
+
     def test_first_notification_baseline_does_not_enqueue_existing_episodes(self):
         episodes = [episode(101, 1), episode(102, 2)]
         self.store.add_watchlist(1, 7, "Аниме")
