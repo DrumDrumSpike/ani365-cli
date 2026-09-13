@@ -200,7 +200,8 @@ class Anime365:
         raise APIError("Слишком много результатов. Уточни название.")
 
     async def search(self, query):
-        rows = await self.listing("series", query=query, fields="id,titles,type,typeTitle,year")
+        rows = await self.listing("series", query=query,
+                                  fields="id,titles,type,typeTitle,year,myAnimeListId")
         needle = query.casefold()
 
         def rank(row):

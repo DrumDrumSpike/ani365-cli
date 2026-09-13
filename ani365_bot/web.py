@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -244,6 +244,21 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
             raise HTTPException(409, "Сначала подключите Anime365 через /auth в боте.")
         return token
 
+    async def shikimori_account(user_id):
+        account = store.external_account(user_id, "shikimori")
+        if not account:
+            raise HTTPException(409, "Сначала подключите Shikimori.")
+        if account["expires_at"] > time.time() + 30:
+            return account
+        try:
+            refreshed = await app.state.shikimori.refresh(account["refresh_token"])
+        except ShikimoriError as exc:
+            raise HTTPException(502, str(exc)) from None
+        store.save_external_account(user_id, "shikimori", refreshed["access_token"],
+                                    refreshed["refresh_token"], app.state.shikimori.expires_at(refreshed),
+                                    account["external_user_id"])
+        return store.external_account(user_id, "shikimori")
+
     @app.on_event("shutdown")
     async def shutdown():
         await app.state.downloads.stop()
@@ -309,6 +324,24 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     async def shikimori_disconnect(user_id=Depends(authenticated_user)):
         store.forget_external_account(user_id, "shikimori")
         return Response(status_code=204)
+
+    @app.get("/api/shikimori/import/preview")
+    async def shikimori_import_preview(statuses: list[str] = Query(default=["watching", "planned"]),
+                                       user_id=Depends(authenticated_user)):
+        allowed = {"planned", "watching", "rewatching", "completed", "on_hold", "dropped"}
+        selected = set(statuses)
+        if not selected or not selected <= allowed:
+            raise HTTPException(422, "Некорректный статус Shikimori.")
+        account = await shikimori_account(user_id)
+        try:
+            rates = await app.state.shikimori.user_rates(account["access_token"], account["external_user_id"])
+        except ShikimoriError as exc:
+            raise HTTPException(502, str(exc)) from None
+        # A preview deliberately has no write side effects. The following import
+        # step can only auto-link a verified external ID, never a fuzzy title.
+        items = [{key: row.get(key) for key in ("id", "target_id", "target_type", "status", "episodes", "target")}
+                 for row in rates if row.get("status") in selected and row.get("target_type", "Anime") == "Anime"]
+        return {"items": items, "count": len(items), "policy": "progress=max(local, shikimori)"}
 
     @app.get("/api/library")
     async def library(user_id=Depends(authenticated_user)):

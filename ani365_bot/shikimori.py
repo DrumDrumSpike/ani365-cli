@@ -30,6 +30,9 @@ class Shikimori:
     async def exchange_code(self, code):
         return await self._token({"grant_type": "authorization_code", "code": code})
 
+    async def refresh(self, refresh_token):
+        return await self._token({"grant_type": "refresh_token", "refresh_token": refresh_token})
+
     async def _token(self, values):
         values.update({"client_id": self.client_id, "client_secret": self.client_secret,
                        "redirect_uri": self.redirect_uri})
@@ -58,6 +61,22 @@ class Shikimori:
         if not isinstance(payload, dict) or payload.get("id") is None:
             raise ShikimoriError("Shikimori вернул неполный профиль.")
         return payload
+
+    async def user_rates(self, access_token, user_id):
+        """Read the documented v2 list endpoint without putting tokens in URLs."""
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.get(self.api_base + "/v2/user_rates", params={
+                    "user_id": user_id, "target_type": "Anime", "limit": 500,
+                }, headers={"User-Agent": self.app_name, "Authorization": f"Bearer {access_token}",
+                            "Accept": "application/json"})
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError):
+            raise ShikimoriError("Не удалось получить список Shikimori.") from None
+        if not isinstance(payload, list):
+            raise ShikimoriError("Shikimori вернул неизвестный формат списка.")
+        return [row for row in payload if isinstance(row, dict)]
 
     @staticmethod
     def expires_at(payload):
