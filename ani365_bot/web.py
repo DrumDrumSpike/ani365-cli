@@ -26,6 +26,7 @@ from .api import APIError, Anime365, number, title
 from .downloads import DownloadManager
 from .http import HTTPClient
 from .media import MAX_SUBTITLE_FILE, MediaError, _run
+from .matching import rank_anime365_candidates, shikimori_titles
 from .shikimori import Shikimori, ShikimoriError
 from .translations import group_translations, viewing_type
 
@@ -35,6 +36,7 @@ INIT_DATA_MAX_AGE = 24 * 60 * 60
 SESSION_MAX_AGE = 6 * 60 * 60
 TICKET_TTL = 5 * 60
 TRAVEL_BATCH_LIMIT = 25
+SHIKIMORI_AUTO_LINK_BATCH = 50
 
 
 class WebAuthError(ValueError):
@@ -275,6 +277,16 @@ def _shikimori_rates(rows, statuses):
     return result
 
 
+async def _shikimori_candidates(anime_client, shikimori_client, rate):
+    """Search every stable Shikimori title and retain only safe candidate data."""
+    external = await shikimori_client.anime(rate["external_anime_id"])
+    rows = []
+    for query in shikimori_titles(external, rate["title"]):
+        rows.extend(await anime_client.search(query))
+    return external, rank_anime365_candidates(
+        external, rows, fallback_title=rate["title"], fallback_mal_id=rate["external_anime_id"])
+
+
 def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     """Create an app with injectable dependencies for isolated integration tests."""
     if config is None:
@@ -483,6 +495,42 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         return {"items": store.external_user_rates(user_id, "shikimori", linked=linked),
                 "policy": "progress=max(local, shikimori); Shikimori status is primary"}
 
+    @app.post("/api/shikimori/imports/auto-link")
+    async def shikimori_auto_link(user_id=Depends(authenticated_user)):
+        """Link a bounded batch only where Anime365 itself confirms the MAL ID."""
+        app.state.limiter.check(user_id, "shikimori-auto-link", 1, window=60)
+        rates = store.external_user_rates(user_id, "shikimori", linked=False,
+                                          limit=SHIKIMORI_AUTO_LINK_BATCH)
+        semaphore = asyncio.Semaphore(4)
+
+        async def lookup(rate):
+            async with semaphore:
+                try:
+                    rows = await anime.series_by_mal_id(rate["external_anime_id"])
+                except APIError:
+                    LOG.info("Shikimori MAL lookup unavailable (user=%s, rate=%s)",
+                             user_id, rate["external_rate_id"])
+                    return rate, None
+            return rate, rows[0] if len(rows) == 1 else None
+
+        matches = await asyncio.gather(*(lookup(rate) for rate in rates))
+        linked = 0
+        for rate, selected in matches:
+            if selected is None:
+                continue
+            series_id = int(selected["id"])
+            store.add_watchlist(user_id, series_id, title(selected), selected.get("year"),
+                                selected.get("typeTitle") or selected.get("type"))
+            store.save_external_id(series_id, "shikimori", rate["external_anime_id"])
+            store.save_external_id(series_id, "mal", str(selected["myAnimeListId"]))
+            bound = store.link_external_user_rate(user_id, "shikimori", rate["external_rate_id"], series_id)
+            if bound:
+                await merge_shikimori_progress(user_id, series_id, bound)
+                linked += 1
+        remaining = len(store.external_user_rates(user_id, "shikimori", linked=False))
+        return {"checked": len(rates), "linked": linked, "remaining": remaining,
+                "batch_limited": remaining > 0 and len(rates) == SHIKIMORI_AUTO_LINK_BATCH}
+
     @app.get("/api/shikimori/imports/{rate_id}/candidates")
     async def shikimori_candidates(rate_id: str, user_id=Depends(authenticated_user)):
         app.state.limiter.check(user_id, "shikimori-candidates", 30)
@@ -490,18 +538,16 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         if not rate:
             raise HTTPException(404, "Импортированный тайтл не найден.")
         try:
-            external = await app.state.shikimori.anime(rate["external_anime_id"])
-            query = str(external.get("russian") or external.get("name") or rate["title"]).strip()
-            rows = await anime.search(query)
+            _external, matched = await _shikimori_candidates(anime, app.state.shikimori, rate)
         except ShikimoriError as exc:
             raise HTTPException(502, str(exc)) from None
         except APIError as exc:
             _api_error(exc)
-        mal_id = external.get("mal_id") or external.get("malId")
-        candidates = [{"series_id": int(row["id"]), "title": title(row), "year": row.get("year"),
-                       "type": row.get("typeTitle") or row.get("type"),
-                       "verified_mal": mal_id is not None and str(row.get("myAnimeListId")) == str(mal_id)}
-                      for row in rows[:20]]
+        candidates = [{"series_id": item["series_id"], "title": title(item["row"]),
+                       "year": item["row"].get("year"),
+                       "type": item["row"].get("typeTitle") or item["row"].get("type"),
+                       "verified_mal": item["verified_mal"], "match_reason": item["match_reason"]}
+                      for item in matched[:20]]
         return {"rate": rate, "candidates": candidates,
                 "verified_mal_available": any(item["verified_mal"] for item in candidates)}
 
@@ -512,26 +558,23 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         if not rate:
             raise HTTPException(404, "Импортированный тайтл не найден.")
         try:
-            external = await app.state.shikimori.anime(rate["external_anime_id"])
-            query = str(external.get("russian") or external.get("name") or rate["title"]).strip()
-            rows = await anime.search(query)
+            _external, candidates = await _shikimori_candidates(anime, app.state.shikimori, rate)
         except ShikimoriError as exc:
             raise HTTPException(502, str(exc)) from None
         except APIError as exc:
             _api_error(exc)
-        selected = next((row for row in rows if int(row.get("id", 0)) == payload.series_id), None)
-        if selected is None:
+        candidate = next((item for item in candidates if item["series_id"] == payload.series_id), None)
+        if candidate is None:
             raise HTTPException(422, "Выбранный Anime365 тайтл отсутствует среди кандидатов.")
-        mal_id = external.get("mal_id") or external.get("malId")
-        verified = mal_id is not None and str(selected.get("myAnimeListId")) == str(mal_id)
+        selected, verified = candidate["row"], candidate["verified_mal"]
         if not verified and not payload.confirm_manual:
             raise HTTPException(409, "Подтвердите ручную привязку: MAL ID не совпал.")
         series_id = int(selected["id"])
         store.add_watchlist(user_id, series_id, title(selected), selected.get("year"),
                             selected.get("typeTitle") or selected.get("type"))
         store.save_external_id(series_id, "shikimori", rate["external_anime_id"])
-        if mal_id is not None:
-            store.save_external_id(series_id, "mal", mal_id)
+        if verified:
+            store.save_external_id(series_id, "mal", str(selected["myAnimeListId"]))
         linked = store.link_external_user_rate(user_id, "shikimori", rate_id, series_id)
         await merge_shikimori_progress(user_id, series_id, linked)
         return {"item": linked, "verified_mal": verified}
