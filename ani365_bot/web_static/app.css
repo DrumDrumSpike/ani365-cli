@@ -13,5 +13,6 @@ button, input, select { font: inherit; } button.action { border: 0; border-radiu
 button.secondary { background: var(--tg-theme-secondary-bg-color, #243241); color: inherit; }
 .episodes { display: flex; flex-wrap: wrap; gap: 7px; }.episodes button { min-width: 42px; }
 input, select { width: 100%; padding: 12px; border-radius: 10px; border: 0; margin: 5px 0; }
+input[type="checkbox"] { width: auto; padding: 0; margin-right: 6px; }
 video { width: 100%; max-height: 75vh; background: #000; border-radius: 12px; }
 .error { color: #ff8888; white-space: pre-wrap; } .back { margin-top: 12px; }

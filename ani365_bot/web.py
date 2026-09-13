@@ -159,6 +159,11 @@ class AddLibraryRequest(BaseModel):
     series_type: str | None = Field(default=None, max_length=80)
 
 
+class NotificationRequest(BaseModel):
+    enabled: bool
+    mode: str = Field(default="any", pattern="^(any|subtitles|voice)$")
+
+
 class PlayRequest(BaseModel):
     series_id: int = Field(gt=0)
     episode_id: int = Field(gt=0)
@@ -545,6 +550,23 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         if not store.remove_watchlist(user_id, series_id):
             raise HTTPException(404, "Anime is not in your library.")
         return Response(status_code=204)
+
+    @app.patch("/api/library/{series_id}/notifications")
+    async def update_library_notifications(series_id: int, payload: NotificationRequest,
+                                           user_id=Depends(authenticated_user)):
+        watch = store.get_watchlist(user_id, series_id)
+        if watch is None:
+            raise HTTPException(404, "Anime is not in your library.")
+        rows = ()
+        if payload.enabled:
+            try:
+                rows = await anime.episodes(series_id)
+            except APIError as exc:
+                _api_error(exc)
+        item = store.configure_notifications(user_id, series_id, payload.enabled, payload.mode, rows)
+        if item is None:
+            raise HTTPException(404, "Anime is not in your library.")
+        return item
 
     @app.get("/api/catalog")
     async def catalog(query: str, user_id=Depends(authenticated_user)):
