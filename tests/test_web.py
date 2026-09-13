@@ -279,6 +279,23 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.store.get_watchlist(42, 55)["last_watched_episode_id"], 700)
         self.assertEqual(self.client.get("/api/shikimori/imports", headers=self.headers(99)).status_code, 403)
 
+    def test_shikimori_import_hydrates_titleless_rates_in_one_batch(self):
+        self.store.save_external_account(42, "shikimori", "shiki-access", "shiki-refresh",
+                                         time.time() + 3600, "123")
+        shikimori = type("Shikimori", (), {})()
+        shikimori.user_rates = AsyncMock(return_value=[{
+            "id": 51, "target_id": 701, "target_type": "Anime", "status": "planned", "episodes": 0,
+        }])
+        shikimori.animes = AsyncMock(return_value={"701": {
+            "id": 701, "russian": "Нормальное название", "name": "Normal title",
+        }})
+        self.app.state.shikimori = shikimori
+        result = self.client.post("/api/shikimori/import", headers=self.headers(42),
+                                  json={"statuses": ["planned"]})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json()["unmatched"][0]["title"], "Нормальное название")
+        self.assertEqual(shikimori.animes.await_args.args[0], ["701"])
+
 
 if __name__ == "__main__":
     unittest.main()

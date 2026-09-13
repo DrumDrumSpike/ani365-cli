@@ -552,14 +552,14 @@ class Store:
                 imported.append(rate_id)
         return imported
 
-    def external_user_rates(self, user_id, provider, *, linked=None, limit=500):
+    def external_user_rates(self, user_id, provider, *, linked=None, limit=2000):
         user_id = self._positive_id(user_id, "user_id")
         where, params = ["user_id=?", "provider=?"], [user_id, str(provider)]
         if linked is True:
             where.append("anime365_series_id IS NOT NULL")
         elif linked is False:
             where.append("anime365_series_id IS NULL")
-        limit = max(1, min(1000, int(limit)))
+        limit = max(1, min(5000, int(limit)))
         rows = self.db.execute(f"""
             SELECT external_rate_id, external_anime_id, status, episodes, title,
                    anime365_series_id, imported_at
