@@ -460,6 +460,15 @@ class Store:
             """, (user_id, str(provider), self.cipher.encrypt(str(access_token).encode()),
                   self.cipher.encrypt(str(refresh_token).encode()), float(expires_at), external_user_id))
 
+    def set_external_sync_enabled(self, user_id, provider, enabled):
+        """Change only the owner's automatic progress-sync preference."""
+        user_id = self._positive_id(user_id, "user_id")
+        with self.db:
+            cursor = self.db.execute("""
+                UPDATE external_accounts SET sync_enabled=? WHERE user_id=? AND provider=?
+            """, (int(bool(enabled)), user_id, str(provider)))
+        return bool(cursor.rowcount)
+
     def forget_external_account(self, user_id, provider):
         with self.db:
             self.db.execute("DELETE FROM external_accounts WHERE user_id=? AND provider=?",

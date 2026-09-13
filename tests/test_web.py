@@ -232,6 +232,15 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/shikimori/connect", headers=self.headers(42)).status_code, 409)
         self.assertEqual(self.client.get("/api/shikimori/status", headers=self.headers(99)).status_code, 403)
 
+    def test_shikimori_sync_setting_is_private_and_persistent(self):
+        self.store.save_external_account(42, "shikimori", "access", "refresh", time.time() + 3600, "123")
+        result = self.client.patch("/api/shikimori/settings", headers=self.headers(42),
+                                   json={"sync_enabled": False})
+        self.assertEqual(result.json(), {"sync_enabled": False})
+        self.assertFalse(self.store.external_account_status(42, "shikimori")["sync_enabled"])
+        self.assertEqual(self.client.patch("/api/shikimori/settings", headers=self.headers(99),
+                                           json={"sync_enabled": True}).status_code, 403)
+
     def test_shikimori_import_uses_anime_id_mal_bridge_and_alternative_title_searches(self):
         self.store.save_external_account(42, "shikimori", "shiki-access", "shiki-refresh",
                                          time.time() + 3600, "123")
