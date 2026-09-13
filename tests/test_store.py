@@ -138,6 +138,17 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.get_watchlist(2, 10)["last_watched_episode_id"], None)
         self.assertEqual(self.store.recent_playback(1)[0]["playback"]["episode_id"], 101)
 
+    def test_external_account_and_oauth_state_are_private_and_one_time(self):
+        self.store.save_external_account(1, "shikimori", "access-secret", "refresh-secret", 100, "42")
+        self.assertEqual(self.store.external_account_status(1, "shikimori"), {
+            "connected": True, "external_user_id": "42", "expires_at": 100.0, "sync_enabled": True,
+        })
+        self.assertIsNone(self.store.external_account(2, "shikimori"))
+        self.store.create_oauth_state(1, "shikimori", "state-which-is-not-a-token", now=1)
+        self.assertEqual(self.store.consume_oauth_state("shikimori", "state-which-is-not-a-token", now=2), 1)
+        self.assertIsNone(self.store.consume_oauth_state("shikimori", "state-which-is-not-a-token", now=2))
+        self.assertNotIn(b"access-secret", (self.directory / "bot.sqlite3").read_bytes())
+
     def test_first_notification_baseline_does_not_enqueue_existing_episodes(self):
         episodes = [episode(101, 1), episode(102, 2)]
         self.store.add_watchlist(1, 7, "Аниме")

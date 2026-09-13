@@ -137,6 +137,12 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.headers["content-range"], "bytes 2-4/10")
         self.assertEqual(seen, ["bytes=2-4"])
 
+    def test_shikimori_status_is_private_and_unconfigured_connect_is_rejected(self):
+        status = self.client.get("/api/shikimori/status", headers=self.headers(42))
+        self.assertEqual(status.json(), {"configured": False, "connected": False})
+        self.assertEqual(self.client.post("/api/shikimori/connect", headers=self.headers(42)).status_code, 409)
+        self.assertEqual(self.client.get("/api/shikimori/status", headers=self.headers(99)).status_code, 403)
+
 
 if __name__ == "__main__":
     unittest.main()

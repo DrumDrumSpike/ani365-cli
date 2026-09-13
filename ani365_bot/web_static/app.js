@@ -20,8 +20,9 @@
     try {
       telegram?.BackButton.hide();
       const data = await api('/api/library'); state.library = data.items;
-      root.innerHTML = `<h1>Anime365</h1><button class="action" id="search">Найти аниме</button><h2>Продолжить просмотр</h2>${cards(data.continue, true)}<h2>Смотрю</h2>${cards(data.items)}`;
+      root.innerHTML = `<h1>Anime365</h1><button class="action" id="search">Найти аниме</button><button class="action secondary" id="settings">Настройки</button><h2>Продолжить просмотр</h2>${cards(data.continue, true)}<h2>Смотрю</h2>${cards(data.items)}`;
       document.getElementById('search').onclick = search;
+      document.getElementById('settings').onclick = settings;
       root.querySelectorAll('[data-series]').forEach(button => button.onclick = () => details(Number(button.dataset.series)));
     } catch (error) { fail(error); }
   }
@@ -34,6 +35,7 @@
     useBack(); root.querySelector('.back').onclick = back;
     root.querySelector('#go').onclick = async () => { try { const data = await api(`/api/catalog?query=${encodeURIComponent(root.querySelector('#query').value)}`); root.querySelector('#results').innerHTML = cards(data.items); root.querySelectorAll('[data-series]').forEach(button => button.onclick = async () => { const item = data.items.find(row => Number(row.id) === Number(button.dataset.series)); await api('/api/library', { method:'POST', body: JSON.stringify({ series_id:item.id, title:item.titles?.ru || item.titles?.romaji || item.titles?.en || 'Без названия', year:item.year, series_type:item.typeTitle || item.type }) }); details(item.id); }); } catch(error) { fail(error); } };
   }
+  async function settings() { try { const data = await api('/api/shikimori/status'); root.innerHTML = `<h1>Настройки</h1><section class="panel"><h2>Shikimori</h2><p class="meta">${data.connected ? 'Подключён' : data.configured ? 'Не подключён' : 'OAuth не настроен на сервере'}</p>${data.connected ? '<button class="action secondary" id="disconnect">Отключить</button>' : data.configured ? '<button class="action" id="connect">Подключить Shikimori</button>' : ''}</section><button class="action secondary back">Назад</button>`; root.querySelector('.back').onclick = back; if (data.connected) root.querySelector('#disconnect').onclick = async () => { await api('/api/shikimori', {method:'DELETE'}); settings(); }; if (data.configured && !data.connected) root.querySelector('#connect').onclick = async () => { const result = await api('/api/shikimori/connect', {method:'POST'}); location.href = result.authorization_url; }; } catch(error) { fail(error); } }
   async function details(seriesId) {
     try { const data = await api(`/api/library/${seriesId}`); state.selected = data; const p = data.playback; root.innerHTML = `<h1>${esc(data.item.title)}</h1><p class="meta">Просмотрено: ${esc(data.item.last_watched_episode_number || 0)} / ${data.episodes.length}</p>${p ? `<button class="action" id="resume">Продолжить с ${Math.floor(p.position_seconds/60)}:${String(Math.floor(p.position_seconds%60)).padStart(2,'0')}</button>` : ''}<h2>Серии</h2><div class="episodes">${data.episodes.map(ep => `<button class="action ${ep.watched ? 'secondary' : ''}" data-episode="${ep.id}">${ep.watched ? '✓ ' : ''}${esc(ep.number)}</button>`).join('')}</div><button class="action secondary back">Назад</button>`; useBack(); root.querySelector('.back').onclick = back; if (p) root.querySelector('#resume').onclick = () => selectEpisode(p.episode_id); root.querySelectorAll('[data-episode]').forEach(button => button.onclick = () => selectEpisode(Number(button.dataset.episode))); } catch(error) { fail(error); }
   }

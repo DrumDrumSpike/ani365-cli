@@ -17,12 +17,13 @@ from urllib.parse import parse_qsl
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .api import APIError, Anime365, number
 from .downloads import DownloadManager
 from .http import HTTPClient
+from .shikimori import Shikimori, ShikimoriError
 from .translations import group_translations
 
 
@@ -217,6 +218,8 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     app.state.download_tickets = EphemeralTickets()
     app.state.downloads = DownloadManager(config, store, anime)
     app.state.proxy_transport = proxy_transport
+    app.state.shikimori = Shikimori(config.shikimori_client_id, config.shikimori_client_secret,
+                                    config.shikimori_redirect_uri)
 
     async def authenticated_user(request: Request,
                                  init_data: str | None = Header(default=None,
@@ -272,6 +275,40 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
                             max_age=SESSION_MAX_AGE, httponly=True, secure=config.web_cookie_secure,
                             samesite="strict", path="/")
         return {"user_id": user_id, "anime365_connected": bool(store.token(user_id))}
+
+    @app.get("/api/shikimori/status")
+    async def shikimori_status(user_id=Depends(authenticated_user)):
+        return {"configured": app.state.shikimori.configured,
+                **store.external_account_status(user_id, "shikimori")}
+
+    @app.post("/api/shikimori/connect")
+    async def shikimori_connect(user_id=Depends(authenticated_user)):
+        if not app.state.shikimori.configured:
+            raise HTTPException(409, "Shikimori OAuth ещё не настроен на сервере.")
+        state = secrets.token_urlsafe(32)
+        store.create_oauth_state(user_id, "shikimori", state)
+        return {"authorization_url": app.state.shikimori.authorize_url(state)}
+
+    @app.get("/api/shikimori/callback")
+    async def shikimori_callback(code: str = "", state: str = ""):
+        # A callback is authenticated by its one-time, owner-bound state; it does
+        # not accept a Telegram user id and does not log either state or code.
+        user_id = store.consume_oauth_state("shikimori", state)
+        if not user_id or not app.state.shikimori.configured or not code or len(code) > 4096:
+            return HTMLResponse("<h1>Не удалось подтвердить Shikimori.</h1>", status_code=400)
+        try:
+            token = await app.state.shikimori.exchange_code(code)
+            profile = await app.state.shikimori.whoami(token["access_token"])
+            store.save_external_account(user_id, "shikimori", token["access_token"], token["refresh_token"],
+                                        app.state.shikimori.expires_at(token), str(profile["id"]))
+        except ShikimoriError:
+            return HTMLResponse("<h1>Shikimori временно недоступен. Попробуйте ещё раз.</h1>", status_code=502)
+        return HTMLResponse("<h1>Shikimori подключён.</h1><p>Вернитесь в Telegram Mini App.</p>")
+
+    @app.delete("/api/shikimori")
+    async def shikimori_disconnect(user_id=Depends(authenticated_user)):
+        store.forget_external_account(user_id, "shikimori")
+        return Response(status_code=204)
 
     @app.get("/api/library")
     async def library(user_id=Depends(authenticated_user)):

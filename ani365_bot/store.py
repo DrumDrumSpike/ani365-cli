@@ -6,7 +6,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class StateError(ValueError):
@@ -90,6 +90,11 @@ class Store:
             with self.db:
                 self._create_v4()
                 self.db.execute("PRAGMA user_version = 4")
+            version = 4
+        if version < 5:
+            with self.db:
+                self._create_v5()
+                self.db.execute("PRAGMA user_version = 5")
 
     def _create_v1(self):
         """Initial schema, kept idempotent for pre-versioned installations."""
@@ -252,6 +257,30 @@ class Store:
             ON download_jobs(status, created_at)
         """)
 
+    def _create_v5(self):
+        """Encrypted third-party accounts and one-time OAuth callback state."""
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS external_accounts (
+                user_id INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                access_token BLOB NOT NULL,
+                refresh_token BLOB NOT NULL,
+                expires_at REAL NOT NULL,
+                external_user_id TEXT,
+                sync_enabled INTEGER NOT NULL DEFAULT 1 CHECK(sync_enabled IN (0, 1)),
+                PRIMARY KEY(user_id, provider)
+            )
+        """)
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS oauth_states (
+                state TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                expires_at REAL NOT NULL
+            )
+        """)
+        self.db.execute("CREATE INDEX IF NOT EXISTS oauth_states_expiry_idx ON oauth_states(expires_at)")
+
     @staticmethod
     def _now(value):
         return time.time() if value is None else float(value)
@@ -330,6 +359,65 @@ class Store:
     def forget_token(self, user_id):
         with self.db:
             self.db.execute("DELETE FROM users WHERE user_id=?", (user_id,))
+
+    def external_account(self, user_id, provider):
+        user_id = self._positive_id(user_id, "user_id")
+        row = self.db.execute("""
+            SELECT access_token, refresh_token, expires_at, external_user_id, sync_enabled
+            FROM external_accounts WHERE user_id=? AND provider=?
+        """, (user_id, str(provider))).fetchone()
+        if not row:
+            return None
+        try:
+            return {"access_token": self.cipher.decrypt(row[0]).decode(),
+                    "refresh_token": self.cipher.decrypt(row[1]).decode(), "expires_at": row[2],
+                    "external_user_id": row[3], "sync_enabled": bool(row[4])}
+        except InvalidToken:
+            raise StateError("Cannot decrypt external account; restore matching token.key") from None
+
+    def external_account_status(self, user_id, provider):
+        account = self.external_account(user_id, provider)
+        if not account:
+            return {"connected": False}
+        return {"connected": True, "external_user_id": account["external_user_id"],
+                "expires_at": account["expires_at"], "sync_enabled": account["sync_enabled"]}
+
+    def save_external_account(self, user_id, provider, access_token, refresh_token, expires_at,
+                              external_user_id=None):
+        user_id = self._positive_id(user_id, "user_id")
+        if not access_token or not refresh_token:
+            raise ValueError("External tokens are required")
+        with self.db:
+            self.db.execute("""
+                INSERT INTO external_accounts(
+                    user_id, provider, access_token, refresh_token, expires_at, external_user_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, provider) DO UPDATE SET access_token=excluded.access_token,
+                    refresh_token=excluded.refresh_token, expires_at=excluded.expires_at,
+                    external_user_id=excluded.external_user_id
+            """, (user_id, str(provider), self.cipher.encrypt(str(access_token).encode()),
+                  self.cipher.encrypt(str(refresh_token).encode()), float(expires_at), external_user_id))
+
+    def forget_external_account(self, user_id, provider):
+        with self.db:
+            self.db.execute("DELETE FROM external_accounts WHERE user_id=? AND provider=?",
+                            (self._positive_id(user_id, "user_id"), str(provider)))
+
+    def create_oauth_state(self, user_id, provider, state, ttl=600, now=None):
+        user_id = self._positive_id(user_id, "user_id")
+        moment = self._now(now)
+        with self.db:
+            self.db.execute("DELETE FROM oauth_states WHERE expires_at <= ?", (moment,))
+            self.db.execute("INSERT INTO oauth_states(state, user_id, provider, expires_at) VALUES (?, ?, ?, ?)",
+                            (str(state), user_id, str(provider), moment + max(1, int(ttl))))
+
+    def consume_oauth_state(self, provider, state, now=None):
+        moment = self._now(now)
+        with self.db:
+            row = self.db.execute("SELECT user_id, expires_at FROM oauth_states WHERE state=? AND provider=?",
+                                  (str(state), str(provider))).fetchone()
+            self.db.execute("DELETE FROM oauth_states WHERE state=?", (str(state),))
+        return row[0] if row and row[1] >= moment else None
 
     # Existing global bot settings API. Telegram's polling offset remains global.
     def get(self, name, default=""):

@@ -22,6 +22,9 @@ class Config:
     playback_completion_threshold: float = 0.9
     download_workers: int = 2
     download_ttl: int = 24 * 60 * 60
+    shikimori_client_id: str = ""
+    shikimori_client_secret: str = ""
+    shikimori_redirect_uri: str = ""
 
     @classmethod
     def from_env(cls):
@@ -71,7 +74,18 @@ class Config:
             raise ConfigError("DOWNLOAD_WORKERS and DOWNLOAD_TTL must be positive integers") from None
         if download_workers <= 0 or download_workers > 8 or download_ttl <= 0:
             raise ConfigError("DOWNLOAD_WORKERS and DOWNLOAD_TTL must be positive integers")
+        shikimori_id = os.environ.get("SHIKIMORI_CLIENT_ID", "").strip()
+        shikimori_secret = os.environ.get("SHIKIMORI_CLIENT_SECRET", "").strip()
+        shikimori_redirect = os.environ.get("SHIKIMORI_REDIRECT_URI", "").strip()
+        if any((shikimori_id, shikimori_secret, shikimori_redirect)) and not all(
+                (shikimori_id, shikimori_secret, shikimori_redirect)):
+            raise ConfigError("Set all SHIKIMORI_CLIENT_ID, SHIKIMORI_CLIENT_SECRET and SHIKIMORI_REDIRECT_URI")
+        if shikimori_redirect:
+            parsed_redirect = urlsplit(shikimori_redirect)
+            if (parsed_redirect.scheme != "https" or not parsed_redirect.hostname
+                    or parsed_redirect.username or parsed_redirect.query or parsed_redirect.fragment):
+                raise ConfigError("SHIKIMORI_REDIRECT_URI must be an HTTPS URL without query")
         return cls(token.strip(), int(owner), Path(os.environ.get("DATA_DIR", "data")), url,
                    telegram_url, Path(os.environ.get("MEDIA_DIR", "/jobs")), watch_check_interval,
                    mini_app_url, cookie_secure in ("1", "true", "yes"), completion_threshold,
-                   download_workers, download_ttl)
+                   download_workers, download_ttl, shikimori_id, shikimori_secret, shikimori_redirect)
