@@ -211,6 +211,22 @@ class Anime365:
 
         return sorted(rows, key=rank)
 
+    async def series_by_mal_id(self, mal_id):
+        """Find a title through Anime365's stable MyAnimeList filter.
+
+        The equality check is deliberately repeated locally: an unexpected
+        upstream filter response must never turn into an automatic mapping.
+        """
+        try:
+            mal_id = int(mal_id)
+        except (TypeError, ValueError):
+            return []
+        if mal_id <= 0:
+            return []
+        rows = await self.listing("series", myAnimeListId=mal_id,
+                                  fields="id,titles,type,typeTitle,year,myAnimeListId")
+        return [row for row in rows if str(row.get("myAnimeListId") or "") == str(mal_id)]
+
     async def episodes(self, series_id):
         rows = await self.listing("episodes", seriesId=series_id, isActive=1,
                                   fields="id,episodeFull,episodeInt,episodeTitle,episodeType")

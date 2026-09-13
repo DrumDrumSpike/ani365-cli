@@ -232,17 +232,24 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/shikimori/connect", headers=self.headers(42)).status_code, 409)
         self.assertEqual(self.client.get("/api/shikimori/status", headers=self.headers(99)).status_code, 403)
 
-    def test_shikimori_import_requires_user_selection_or_verified_mal_mapping(self):
+    def test_shikimori_import_uses_anime_id_mal_bridge_and_alternative_title_searches(self):
         self.store.save_external_account(42, "shikimori", "shiki-access", "shiki-refresh",
                                          time.time() + 3600, "123")
         shikimori = type("Shikimori", (), {})()
         shikimori.user_rates = AsyncMock(return_value=[{
-            "id": 50, "target_id": 600, "target_type": "Anime", "status": "watching",
-            "episodes": 7, "target": {"id": 600, "russian": "Тайтл"},
+            "id": 50, "target_id": 700, "target_type": "Anime", "status": "watching",
+            "episodes": 7, "target": {"id": 700, "russian": "Тайтл"},
         }])
-        shikimori.anime = AsyncMock(return_value={"id": 600, "russian": "Тайтл", "mal_id": 700})
+        shikimori.anime = AsyncMock(return_value={
+            "id": 700, "russian": "Не найдено", "name": "Roman", "english": ["Тайтл"],
+            "mal_id": None,
+        })
         self.app.state.shikimori = shikimori
-        self.anime.search = AsyncMock(return_value=[{
+        self.anime.search = AsyncMock(side_effect=lambda query: [{
+            "id": 55, "titles": {"ru": "Тайтл"}, "year": 2024, "typeTitle": "TV",
+            "myAnimeListId": 700,
+        }] if query == "Тайтл" else [])
+        self.anime.series_by_mal_id = AsyncMock(return_value=[{
             "id": 55, "titles": {"ru": "Тайтл"}, "year": 2024, "typeTitle": "TV",
             "myAnimeListId": 700,
         }])
@@ -250,8 +257,20 @@ class WebTests(unittest.TestCase):
                                     json={"statuses": ["watching"]})
         self.assertEqual(imported.status_code, 200)
         self.assertEqual(imported.json()["unmatched"][0]["external_rate_id"], "50")
+        automatically_linked = self.client.post("/api/shikimori/imports/auto-link", headers=self.headers(42))
+        self.assertEqual(automatically_linked.json()["linked"], 1)
+        self.assertEqual(automatically_linked.json()["remaining"], 0)
+        self.assertTrue(self.store.has_watchlist(42, 55))
+
+        # Re-importing preserves the mapping.  The per-title screen continues
+        # to expose the same verified bridge without accepting a fuzzy result.
+        imported = self.client.post("/api/shikimori/import", headers=self.headers(42),
+                                    json={"statuses": ["watching"]})
+        self.assertEqual(imported.json()["linked"], 1)
         candidates = self.client.get("/api/shikimori/imports/50/candidates", headers=self.headers(42))
         self.assertTrue(candidates.json()["candidates"][0]["verified_mal"])
+        self.assertEqual(candidates.json()["candidates"][0]["match_reason"], "MAL ID совпал")
+        self.assertIn("Тайтл", [call.args[0] for call in self.anime.search.await_args_list])
         linked = self.client.post("/api/shikimori/imports/50/link", headers=self.headers(42),
                                   json={"series_id": 55})
         self.assertEqual(linked.status_code, 200)
