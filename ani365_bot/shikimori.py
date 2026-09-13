@@ -1,4 +1,5 @@
 """Small Shikimori OAuth client; all credential handling stays server-side."""
+import asyncio
 import time
 from urllib.parse import urlencode
 
@@ -12,6 +13,9 @@ class ShikimoriError(Exception):
 class Shikimori:
     oauth_base = "https://shikimori.io/oauth"
     api_base = "https://shikimori.io/api"
+    anime_batch_size = 50
+    # Keep well below both published per-second and per-minute request limits.
+    anime_batch_delay = 0.7
 
     def __init__(self, client_id, client_secret, redirect_uri, app_name="ani365-mini-app"):
         self.client_id, self.client_secret, self.redirect_uri = client_id, client_secret, redirect_uri
@@ -63,11 +67,11 @@ class Shikimori:
         return payload
 
     async def user_rates(self, access_token, user_id):
-        """Read the documented v2 list endpoint without putting tokens in URLs."""
+        """Read the v2 list endpoint; rate records contain IDs, not titles."""
         try:
             async with httpx.AsyncClient(timeout=20) as client:
                 response = await client.get(self.api_base + "/v2/user_rates", params={
-                    "user_id": user_id, "target_type": "Anime", "limit": 500,
+                    "user_id": user_id, "target_type": "Anime",
                 }, headers={"User-Agent": self.app_name, "Authorization": f"Bearer {access_token}",
                             "Accept": "application/json"})
                 response.raise_for_status()
@@ -77,6 +81,43 @@ class Shikimori:
         if not isinstance(payload, list):
             raise ShikimoriError("Shikimori вернул неизвестный формат списка.")
         return [row for row in payload if isinstance(row, dict)]
+
+    async def animes(self, anime_ids):
+        """Read public anime metadata in small, rate-limited ID batches.
+
+        Shikimori's ``ids`` filter expects literal commas rather than encoded
+        commas, so this URL is assembled only from validated integer IDs.
+        """
+        ids, seen = [], set()
+        for value in anime_ids:
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                continue
+            if value > 0 and value not in seen:
+                ids.append(value)
+                seen.add(value)
+        result = {}
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                for offset in range(0, len(ids), self.anime_batch_size):
+                    batch = ids[offset:offset + self.anime_batch_size]
+                    url = (self.api_base + "/animes?ids=" + ",".join(map(str, batch)) +
+                           f"&limit={len(batch)}")
+                    response = await client.get(url, headers={
+                        "User-Agent": self.app_name, "Accept": "application/json"})
+                    response.raise_for_status()
+                    payload = response.json()
+                    if not isinstance(payload, list):
+                        raise ValueError
+                    for row in payload:
+                        if isinstance(row, dict) and row.get("id") is not None:
+                            result[str(row["id"])] = row
+                    if offset + self.anime_batch_size < len(ids):
+                        await asyncio.sleep(self.anime_batch_delay)
+        except (httpx.HTTPError, ValueError):
+            raise ShikimoriError("Не удалось получить названия аниме Shikimori.") from None
+        return result
 
     async def anime(self, anime_id):
         """Fetch one public anime record to obtain its stable MAL bridge."""

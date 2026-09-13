@@ -246,13 +246,15 @@ def _preferred_translation(rows, profile):
 SHIKIMORI_STATUSES = {"planned", "watching", "rewatching", "completed", "on_hold", "dropped"}
 
 
-def _shikimori_title(rate):
+def _shikimori_title(rate, anime=None):
     target = rate.get("target") if isinstance(rate.get("target"), dict) else {}
-    return str(target.get("russian") or target.get("name") or target.get("title")
+    anime = anime if isinstance(anime, dict) else {}
+    return str(target.get("russian") or target.get("name") or target.get("title") or
+               anime.get("russian") or anime.get("name") or anime.get("title")
                or rate.get("title") or f"Shikimori #{rate.get('target_id') or target.get('id') or '?'}")[:500]
 
 
-def _shikimori_rates(rows, statuses):
+def _shikimori_rates(rows, statuses, anime_by_id=None):
     """Keep only safe, normalized Anime rates from an untrusted API payload."""
     result, seen = [], set()
     for row in rows:
@@ -270,11 +272,23 @@ def _shikimori_rates(rows, statuses):
             episodes = max(0, int(row.get("episodes") or 0))
         except (TypeError, ValueError):
             episodes = 0
+        anime = (anime_by_id or {}).get(anime_id)
         result.append({"external_rate_id": rate_id, "external_anime_id": anime_id,
                        "status": str(row["status"]), "episodes": episodes,
-                       "title": _shikimori_title(row)})
+                       "title": _shikimori_title(row, anime)})
         seen.add(rate_id)
     return result
+
+
+async def _shikimori_rates_with_titles(shikimori_client, rows, statuses):
+    """Hydrate only title-less user rates without doing one request per anime."""
+    preliminary = _shikimori_rates(rows, statuses)
+    missing = [item["external_anime_id"] for item in preliminary
+               if item["title"].startswith("Shikimori #")]
+    if not missing:
+        return preliminary
+    details = await shikimori_client.animes(missing)
+    return _shikimori_rates(rows, statuses, details)
 
 
 async def _shikimori_candidates(anime_client, shikimori_client, rate):
@@ -461,7 +475,10 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
             rates = await app.state.shikimori.user_rates(account["access_token"], account["external_user_id"])
         except ShikimoriError as exc:
             raise HTTPException(502, str(exc)) from None
-        items = _shikimori_rates(rates, selected)
+        try:
+            items = await _shikimori_rates_with_titles(app.state.shikimori, rates, selected)
+        except ShikimoriError as exc:
+            raise HTTPException(502, str(exc)) from None
         return {"items": items, "count": len(items), "policy": "progress=max(local, shikimori)"}
 
     @app.post("/api/shikimori/import")
@@ -474,7 +491,10 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
             upstream = await app.state.shikimori.user_rates(account["access_token"], account["external_user_id"])
         except ShikimoriError as exc:
             raise HTTPException(502, str(exc)) from None
-        rates = _shikimori_rates(upstream, selected)
+        try:
+            rates = await _shikimori_rates_with_titles(app.state.shikimori, upstream, selected)
+        except ShikimoriError as exc:
+            raise HTTPException(502, str(exc)) from None
         store.import_external_rates(user_id, "shikimori", rates)
         linked = []
         for rate in store.external_user_rates(user_id, "shikimori", linked=True):
