@@ -146,6 +146,9 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.external_account_status(1, "shikimori"), {
             "connected": True, "external_user_id": "42", "expires_at": 100.0, "sync_enabled": True,
         })
+        self.assertTrue(self.store.set_external_sync_enabled(1, "shikimori", False))
+        self.assertFalse(self.store.external_account_status(1, "shikimori")["sync_enabled"])
+        self.assertFalse(self.store.set_external_sync_enabled(2, "shikimori", True))
         self.assertIsNone(self.store.external_account(2, "shikimori"))
         self.store.create_oauth_state(1, "shikimori", "state-which-is-not-a-token", now=1)
         self.assertEqual(self.store.consume_oauth_state("shikimori", "state-which-is-not-a-token", now=2), 1)

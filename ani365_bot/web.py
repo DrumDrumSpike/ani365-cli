@@ -210,6 +210,10 @@ class ShikimoriLinkRequest(BaseModel):
     confirm_manual: bool = False
 
 
+class ShikimoriSettingsRequest(BaseModel):
+    sync_enabled: bool
+
+
 def _api_error(exc):
     raise HTTPException(409 if exc.code in (401, 403) else 502, str(exc)) from None
 
@@ -434,6 +438,13 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     async def shikimori_status(user_id=Depends(authenticated_user)):
         return {"configured": app.state.shikimori.configured,
                 **store.external_account_status(user_id, "shikimori")}
+
+    @app.patch("/api/shikimori/settings")
+    async def shikimori_settings(payload: ShikimoriSettingsRequest,
+                                 user_id=Depends(authenticated_user)):
+        if not store.set_external_sync_enabled(user_id, "shikimori", payload.sync_enabled):
+            raise HTTPException(409, "Сначала подключите Shikimori.")
+        return {"sync_enabled": payload.sync_enabled}
 
     @app.post("/api/shikimori/connect")
     async def shikimori_connect(user_id=Depends(authenticated_user)):
