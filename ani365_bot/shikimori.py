@@ -78,6 +78,38 @@ class Shikimori:
             raise ShikimoriError("Shikimori вернул неизвестный формат списка.")
         return [row for row in payload if isinstance(row, dict)]
 
+    async def anime(self, anime_id):
+        """Fetch one public anime record to obtain its stable MAL bridge."""
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.get(self.api_base + f"/animes/{int(anime_id)}", headers={
+                    "User-Agent": self.app_name, "Accept": "application/json"})
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError, TypeError):
+            raise ShikimoriError("Не удалось получить данные аниме Shikimori.") from None
+        if not isinstance(payload, dict) or payload.get("id") is None:
+            raise ShikimoriError("Shikimori вернул неполные данные аниме.")
+        return payload
+
+    async def update_user_rate(self, access_token, rate_id, *, episodes=None):
+        """Update only watched count; a library status stays user-controlled."""
+        values = {}
+        if episodes is not None:
+            values["episodes"] = max(0, int(episodes))
+        if not values:
+            return
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.patch(self.api_base + f"/v2/user_rates/{int(rate_id)}",
+                                              json={"user_rate": values}, headers={
+                                                  "User-Agent": self.app_name,
+                                                  "Authorization": f"Bearer {access_token}",
+                                                  "Accept": "application/json"})
+                response.raise_for_status()
+        except (httpx.HTTPError, TypeError, ValueError):
+            raise ShikimoriError("Не удалось обновить прогресс Shikimori.") from None
+
     @staticmethod
     def expires_at(payload):
         return time.time() + max(1, int(payload.get("expires_in", 0) or 0))

@@ -5,11 +5,13 @@ with a Telegram WebApp signature or a short-lived, HttpOnly session established
 from one.  Anime365 credentials and signed media URLs remain backend-only except
 for the selected direct-playback URL returned to its authenticated owner.
 """
+import asyncio
 import hashlib
 import hmac
 import json
 import logging
 import secrets
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,9 +22,10 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Res
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from .api import APIError, Anime365, number
+from .api import APIError, Anime365, number, title
 from .downloads import DownloadManager
 from .http import HTTPClient
+from .media import MAX_SUBTITLE_FILE, MediaError, _run
 from .shikimori import Shikimori, ShikimoriError
 from .translations import group_translations
 
@@ -178,6 +181,17 @@ class DownloadRequest(BaseModel):
     delivery: str = Field(pattern="^(browser|telegram)$")
 
 
+class ShikimoriImportRequest(BaseModel):
+    statuses: list[str] = Field(default_factory=lambda: ["watching", "planned"], max_length=6)
+
+
+class ShikimoriLinkRequest(BaseModel):
+    series_id: int = Field(gt=0)
+    # Required for non-MAL matches.  The UI only sends this after the person has
+    # selected the exact Anime365 result from the displayed candidates.
+    confirm_manual: bool = False
+
+
 def _api_error(exc):
     raise HTTPException(409 if exc.code in (401, 403) else 502, str(exc)) from None
 
@@ -196,6 +210,40 @@ def _episode_payload(episode, watched_id, watched_number):
     }
 
 
+SHIKIMORI_STATUSES = {"planned", "watching", "rewatching", "completed", "on_hold", "dropped"}
+
+
+def _shikimori_title(rate):
+    target = rate.get("target") if isinstance(rate.get("target"), dict) else {}
+    return str(target.get("russian") or target.get("name") or target.get("title")
+               or rate.get("title") or f"Shikimori #{rate.get('target_id') or target.get('id') or '?'}")[:500]
+
+
+def _shikimori_rates(rows, statuses):
+    """Keep only safe, normalized Anime rates from an untrusted API payload."""
+    result, seen = [], set()
+    for row in rows:
+        if row.get("status") not in statuses or row.get("target_type", "Anime") != "Anime":
+            continue
+        target = row.get("target") if isinstance(row.get("target"), dict) else {}
+        rate_id = row.get("id")
+        anime_id = row.get("target_id") or target.get("id")
+        if rate_id is None or anime_id is None:
+            continue
+        rate_id, anime_id = str(rate_id).strip(), str(anime_id).strip()
+        if not rate_id or not anime_id or rate_id in seen:
+            continue
+        try:
+            episodes = max(0, int(row.get("episodes") or 0))
+        except (TypeError, ValueError):
+            episodes = 0
+        result.append({"external_rate_id": rate_id, "external_anime_id": anime_id,
+                       "status": str(row["status"]), "episodes": episodes,
+                       "title": _shikimori_title(row)})
+        seen.add(rate_id)
+    return result
+
+
 def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     """Create an app with injectable dependencies for isolated integration tests."""
     if config is None:
@@ -212,6 +260,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     app.state.store = store
     app.state.anime = anime
     app.state.tickets = EphemeralTickets()
+    app.state.subtitle_tickets = EphemeralTickets()
     app.state.limiter = RateLimiter()
     app.state.sessions = SessionSigner(config.bot_token)
     app.state.config = config
@@ -258,6 +307,39 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
                                     refreshed["refresh_token"], app.state.shikimori.expires_at(refreshed),
                                     account["external_user_id"])
         return store.external_account(user_id, "shikimori")
+
+    async def merge_shikimori_progress(user_id, series_id, rate):
+        """Apply the documented import policy: never lower local progress."""
+        remote = max(0, int(rate["episodes"]))
+        local = store.get_watchlist(user_id, series_id)
+        if not local or remote <= number(local.get("last_watched_episode_number")):
+            return
+        try:
+            rows = await anime.episodes(series_id)
+        except APIError:
+            LOG.warning("Shikimori progress import skipped (user=%s series=%s)", user_id, series_id)
+            return
+        exact = [row for row in rows if number(row.get("episodeInt") or row.get("episodeFull")) == remote]
+        if exact:
+            episode = exact[-1]
+            store.update_progress(user_id, series_id, episode)
+
+    async def sync_shikimori_progress(user_id, series_id, episode_number):
+        """Best-effort completion sync; playback is never blocked by Shikimori."""
+        try:
+            watched = number(episode_number)
+            if watched <= 0 or watched != int(watched):
+                return
+            rate = store.external_rate_for_series(user_id, "shikimori", series_id)
+            account = store.external_account(user_id, "shikimori")
+            if not rate or not account or not account["sync_enabled"] or watched <= rate["episodes"]:
+                return
+            account = await shikimori_account(user_id)
+            await app.state.shikimori.update_user_rate(account["access_token"], rate["external_rate_id"],
+                                                       episodes=int(watched))
+            store.update_external_rate_episodes(user_id, "shikimori", rate["external_rate_id"], int(watched))
+        except (ShikimoriError, HTTPException, ValueError):
+            LOG.warning("Shikimori progress sync failed (user=%s series=%s)", user_id, series_id)
 
     @app.on_event("shutdown")
     async def shutdown():
@@ -328,20 +410,100 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     @app.get("/api/shikimori/import/preview")
     async def shikimori_import_preview(statuses: list[str] = Query(default=["watching", "planned"]),
                                        user_id=Depends(authenticated_user)):
-        allowed = {"planned", "watching", "rewatching", "completed", "on_hold", "dropped"}
         selected = set(statuses)
-        if not selected or not selected <= allowed:
+        if not selected or not selected <= SHIKIMORI_STATUSES:
             raise HTTPException(422, "Некорректный статус Shikimori.")
         account = await shikimori_account(user_id)
         try:
             rates = await app.state.shikimori.user_rates(account["access_token"], account["external_user_id"])
         except ShikimoriError as exc:
             raise HTTPException(502, str(exc)) from None
-        # A preview deliberately has no write side effects. The following import
-        # step can only auto-link a verified external ID, never a fuzzy title.
-        items = [{key: row.get(key) for key in ("id", "target_id", "target_type", "status", "episodes", "target")}
-                 for row in rates if row.get("status") in selected and row.get("target_type", "Anime") == "Anime"]
+        items = _shikimori_rates(rates, selected)
         return {"items": items, "count": len(items), "policy": "progress=max(local, shikimori)"}
+
+    @app.post("/api/shikimori/import")
+    async def shikimori_import(payload: ShikimoriImportRequest, user_id=Depends(authenticated_user)):
+        selected = set(payload.statuses)
+        if not selected or not selected <= SHIKIMORI_STATUSES:
+            raise HTTPException(422, "Некорректный статус Shikimori.")
+        account = await shikimori_account(user_id)
+        try:
+            upstream = await app.state.shikimori.user_rates(account["access_token"], account["external_user_id"])
+        except ShikimoriError as exc:
+            raise HTTPException(502, str(exc)) from None
+        rates = _shikimori_rates(upstream, selected)
+        store.import_external_rates(user_id, "shikimori", rates)
+        linked = []
+        for rate in store.external_user_rates(user_id, "shikimori", linked=True):
+            # A previous explicit mapping or an exact provider-ID mapping can
+            # safely restore this title to the local playback library.
+            if rate["external_rate_id"] not in {item["external_rate_id"] for item in rates}:
+                continue
+            series_id = rate["anime365_series_id"]
+            store.add_watchlist(user_id, series_id, rate["title"])
+            await merge_shikimori_progress(user_id, series_id, rate)
+            linked.append(rate)
+        unmatched = store.external_user_rates(user_id, "shikimori", linked=False)
+        return {"imported": len(rates), "linked": len(linked), "unmatched": unmatched,
+                "policy": "progress=max(local, shikimori); Shikimori status is primary"}
+
+    @app.get("/api/shikimori/imports")
+    async def shikimori_imports(linked: bool | None = None, user_id=Depends(authenticated_user)):
+        return {"items": store.external_user_rates(user_id, "shikimori", linked=linked),
+                "policy": "progress=max(local, shikimori); Shikimori status is primary"}
+
+    @app.get("/api/shikimori/imports/{rate_id}/candidates")
+    async def shikimori_candidates(rate_id: str, user_id=Depends(authenticated_user)):
+        app.state.limiter.check(user_id, "shikimori-candidates", 30)
+        rate = store.external_user_rate(user_id, "shikimori", rate_id)
+        if not rate:
+            raise HTTPException(404, "Импортированный тайтл не найден.")
+        try:
+            external = await app.state.shikimori.anime(rate["external_anime_id"])
+            query = str(external.get("russian") or external.get("name") or rate["title"]).strip()
+            rows = await anime.search(query)
+        except ShikimoriError as exc:
+            raise HTTPException(502, str(exc)) from None
+        except APIError as exc:
+            _api_error(exc)
+        mal_id = external.get("mal_id") or external.get("malId")
+        candidates = [{"series_id": int(row["id"]), "title": title(row), "year": row.get("year"),
+                       "type": row.get("typeTitle") or row.get("type"),
+                       "verified_mal": mal_id is not None and str(row.get("myAnimeListId")) == str(mal_id)}
+                      for row in rows[:20]]
+        return {"rate": rate, "candidates": candidates,
+                "verified_mal_available": any(item["verified_mal"] for item in candidates)}
+
+    @app.post("/api/shikimori/imports/{rate_id}/link")
+    async def shikimori_link(rate_id: str, payload: ShikimoriLinkRequest,
+                             user_id=Depends(authenticated_user)):
+        rate = store.external_user_rate(user_id, "shikimori", rate_id)
+        if not rate:
+            raise HTTPException(404, "Импортированный тайтл не найден.")
+        try:
+            external = await app.state.shikimori.anime(rate["external_anime_id"])
+            query = str(external.get("russian") or external.get("name") or rate["title"]).strip()
+            rows = await anime.search(query)
+        except ShikimoriError as exc:
+            raise HTTPException(502, str(exc)) from None
+        except APIError as exc:
+            _api_error(exc)
+        selected = next((row for row in rows if int(row.get("id", 0)) == payload.series_id), None)
+        if selected is None:
+            raise HTTPException(422, "Выбранный Anime365 тайтл отсутствует среди кандидатов.")
+        mal_id = external.get("mal_id") or external.get("malId")
+        verified = mal_id is not None and str(selected.get("myAnimeListId")) == str(mal_id)
+        if not verified and not payload.confirm_manual:
+            raise HTTPException(409, "Подтвердите ручную привязку: MAL ID не совпал.")
+        series_id = int(selected["id"])
+        store.add_watchlist(user_id, series_id, title(selected), selected.get("year"),
+                            selected.get("typeTitle") or selected.get("type"))
+        store.save_external_id(series_id, "shikimori", rate["external_anime_id"])
+        if mal_id is not None:
+            store.save_external_id(series_id, "mal", mal_id)
+        linked = store.link_external_user_rate(user_id, "shikimori", rate_id, series_id)
+        await merge_shikimori_progress(user_id, series_id, linked)
+        return {"item": linked, "verified_mal": verified}
 
     @app.get("/api/library")
     async def library(user_id=Depends(authenticated_user)):
@@ -428,9 +590,16 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         except APIError as exc:
             _api_error(exc)
         proxy_ticket = app.state.tickets.create(user_id, source.urls[0])
+        subtitle_url = None
+        if source.subtitle_url:
+            # Subtitle CDNs do not consistently allow cross-origin <track>
+            # requests from Telegram WebView. Keep the signed URL server-side;
+            # a short-lived owner-bound ticket returns WebVTT from this origin.
+            subtitle_ticket = app.state.subtitle_tickets.create(user_id, source.subtitle_url)
+            subtitle_url = f"/api/subtitles/{subtitle_ticket}"
         # Direct playback is first choice. The private ticket is only used after
         # a WebView/CDN incompatibility, never for normal video traffic.
-        return {"media_url": source.urls[0], "subtitle_url": source.subtitle_url,
+        return {"media_url": source.urls[0], "subtitle_url": subtitle_url,
                 "proxy_url": f"/api/stream/{proxy_ticket}", "episode_number": str(
                     episode.get("episodeFull") or episode.get("episodeInt") or "?")}
 
@@ -446,10 +615,17 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         episode = next((row for row in rows if int(row.get("id", 0)) == payload.episode_id), None)
         if episode is None:
             raise HTTPException(422, "Выбранная серия больше недоступна.")
-        return store.record_playback_progress(
+        result = store.record_playback_progress(
             user_id, payload.series_id, payload.episode_id, payload.position_seconds,
             payload.duration_seconds, str(episode.get("episodeFull") or episode.get("episodeInt") or "?"),
             ended=payload.ended, completion_threshold=config.playback_completion_threshold)
+        if result and result["completed"]:
+            # Keep local playback durable even when Shikimori is temporarily
+            # unavailable. The task catches all expected remote failures.
+            asyncio.create_task(sync_shikimori_progress(
+                user_id, payload.series_id,
+                str(episode.get("episodeFull") or episode.get("episodeInt") or "?")))
+        return result
 
     @app.post("/api/downloads")
     async def create_download(payload: DownloadRequest, user_id=Depends(authenticated_user)):
@@ -549,5 +725,38 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
                   if name.lower() in {"content-type", "content-length", "content-range", "accept-ranges"}}
         copied.setdefault("accept-ranges", "bytes")
         return StreamingResponse(body(), status_code=upstream.status_code, headers=copied)
+
+    @app.get("/api/subtitles/{ticket}")
+    async def subtitles(ticket: str, user_id=Depends(authenticated_user)):
+        """Return a small subtitle file as same-origin WebVTT for <track>.
+
+        This intentionally buffers only bounded subtitle text (never video) in
+        a temporary directory.  ASS/SSA styling needs a libass renderer to be
+        fully preserved; WebVTT is the reliable fallback in Telegram WebView.
+        """
+        item = app.state.subtitle_tickets.get(ticket, user_id)
+        if item is None:
+            raise HTTPException(404, "Subtitle link is unavailable or expired.")
+        try:
+            with tempfile.TemporaryDirectory(prefix="subtitle-", dir=config.media_dir) as name:
+                directory = Path(name)
+                subtitle = await asyncio.to_thread(app.state.downloads.media._download_subtitle,
+                                                    item.url, directory)
+                output = subtitle if subtitle.suffix.lower() == ".vtt" else directory / "subtitles.vtt"
+                if output != subtitle:
+                    await _run("ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(subtitle),
+                               "-c:s", "webvtt", str(output))
+                if not output.is_file() or output.stat().st_size == 0:
+                    raise MediaError("Не удалось подготовить субтитры для плеера.")
+                if output.stat().st_size > MAX_SUBTITLE_FILE:
+                    raise MediaError("Файл субтитров оказался слишком большим.")
+                body = await asyncio.to_thread(output.read_bytes)
+        except MediaError as exc:
+            raise HTTPException(502, str(exc)) from None
+        except OSError:
+            LOG.warning("Subtitle preparation failed (storage error)")
+            raise HTTPException(502, "Не удалось подготовить субтитры для плеера.") from None
+        return Response(content=body, media_type="text/vtt; charset=utf-8",
+                        headers={"Cache-Control": "no-store"})
 
     return app

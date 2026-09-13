@@ -6,7 +6,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class StateError(ValueError):
@@ -95,6 +95,11 @@ class Store:
             with self.db:
                 self._create_v5()
                 self.db.execute("PRAGMA user_version = 5")
+            version = 5
+        if version < 6:
+            with self.db:
+                self._create_v6()
+                self.db.execute("PRAGMA user_version = 6")
 
     def _create_v1(self):
         """Initial schema, kept idempotent for pre-versioned installations."""
@@ -281,6 +286,41 @@ class Store:
         """)
         self.db.execute("CREATE INDEX IF NOT EXISTS oauth_states_expiry_idx ON oauth_states(expires_at)")
 
+    def _create_v6(self):
+        """Persist safe Shikimori library metadata and confirmed ID mappings.
+
+        These tables deliberately contain only provider IDs, display labels and
+        progress. OAuth credentials remain solely in ``external_accounts``;
+        Anime365 signed URLs never belong in an import record.
+        """
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS anime_external_ids (
+                anime365_series_id INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                external_id TEXT NOT NULL,
+                PRIMARY KEY(anime365_series_id, provider),
+                UNIQUE(provider, external_id)
+            )
+        """)
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS external_user_rates (
+                user_id INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                external_rate_id TEXT NOT NULL,
+                external_anime_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                episodes INTEGER NOT NULL DEFAULT 0 CHECK(episodes >= 0),
+                title TEXT NOT NULL,
+                anime365_series_id INTEGER,
+                imported_at REAL NOT NULL,
+                PRIMARY KEY(user_id, provider, external_rate_id)
+            )
+        """)
+        self.db.execute("""
+            CREATE INDEX IF NOT EXISTS external_user_rates_series_idx
+            ON external_user_rates(user_id, provider, anime365_series_id)
+        """)
+
     @staticmethod
     def _now(value):
         return time.time() if value is None else float(value)
@@ -418,6 +458,136 @@ class Store:
                                   (str(state), str(provider))).fetchone()
             self.db.execute("DELETE FROM oauth_states WHERE state=?", (str(state),))
         return row[0] if row and row[1] >= moment else None
+
+    # Shikimori import state. A mapping is only created after an exact MAL
+    # bridge or a user's explicit selection in the Mini App.
+    def save_external_id(self, series_id, provider, external_id):
+        series_id = self._positive_id(series_id, "series_id")
+        provider, external_id = str(provider).strip(), str(external_id).strip()
+        if not provider or not external_id:
+            raise ValueError("External provider and id are required")
+        with self.db:
+            self.db.execute("""
+                INSERT INTO anime_external_ids(anime365_series_id, provider, external_id)
+                VALUES (?, ?, ?)
+                ON CONFLICT(provider, external_id) DO UPDATE SET anime365_series_id=excluded.anime365_series_id
+            """, (series_id, provider, external_id))
+
+    def external_series_id(self, provider, external_id):
+        row = self.db.execute("""
+            SELECT anime365_series_id FROM anime_external_ids
+            WHERE provider=? AND external_id=?
+        """, (str(provider).strip(), str(external_id).strip())).fetchone()
+        return int(row[0]) if row else None
+
+    @staticmethod
+    def _external_rate(row):
+        keys = ("external_rate_id", "external_anime_id", "status", "episodes", "title",
+                "anime365_series_id", "imported_at")
+        return dict(zip(keys, row)) if row else None
+
+    def import_external_rates(self, user_id, provider, rates, now=None):
+        """Upsert a filtered external list without changing local progress.
+
+        ``rates`` are normalized by the web layer.  Existing manual mappings
+        survive a later import and only same-provider/global ID matches link
+        automatically.
+        """
+        user_id = self._positive_id(user_id, "user_id")
+        provider, timestamp = str(provider).strip(), self._now(now)
+        if not provider:
+            raise ValueError("External provider is required")
+        imported = []
+        with self.db:
+            for rate in rates:
+                rate_id = str(rate["external_rate_id"]).strip()
+                anime_id = str(rate["external_anime_id"]).strip()
+                status = str(rate["status"]).strip()
+                title = str(rate.get("title") or "Без названия").strip()[:500] or "Без названия"
+                try:
+                    episodes = max(0, int(rate.get("episodes") or 0))
+                except (TypeError, ValueError):
+                    episodes = 0
+                if not rate_id or not anime_id or not status:
+                    continue
+                mapped = self.external_series_id(provider, anime_id)
+                previous = self.db.execute("""
+                    SELECT anime365_series_id FROM external_user_rates
+                    WHERE user_id=? AND provider=? AND external_rate_id=?
+                """, (user_id, provider, rate_id)).fetchone()
+                series_id = previous[0] if previous and previous[0] is not None else mapped
+                self.db.execute("""
+                    INSERT INTO external_user_rates(
+                        user_id, provider, external_rate_id, external_anime_id, status, episodes,
+                        title, anime365_series_id, imported_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id, provider, external_rate_id) DO UPDATE SET
+                        external_anime_id=excluded.external_anime_id, status=excluded.status,
+                        episodes=excluded.episodes, title=excluded.title, imported_at=excluded.imported_at,
+                        anime365_series_id=COALESCE(external_user_rates.anime365_series_id,
+                                                     excluded.anime365_series_id)
+                """, (user_id, provider, rate_id, anime_id, status, episodes, title, series_id, timestamp))
+                imported.append(rate_id)
+        return imported
+
+    def external_user_rates(self, user_id, provider, *, linked=None, limit=500):
+        user_id = self._positive_id(user_id, "user_id")
+        where, params = ["user_id=?", "provider=?"], [user_id, str(provider)]
+        if linked is True:
+            where.append("anime365_series_id IS NOT NULL")
+        elif linked is False:
+            where.append("anime365_series_id IS NULL")
+        limit = max(1, min(1000, int(limit)))
+        rows = self.db.execute(f"""
+            SELECT external_rate_id, external_anime_id, status, episodes, title,
+                   anime365_series_id, imported_at
+            FROM external_user_rates WHERE {' AND '.join(where)}
+            ORDER BY imported_at DESC, title COLLATE NOCASE LIMIT ?
+        """, [*params, limit]).fetchall()
+        return [self._external_rate(row) for row in rows]
+
+    def external_user_rate(self, user_id, provider, rate_id):
+        user_id = self._positive_id(user_id, "user_id")
+        row = self.db.execute("""
+            SELECT external_rate_id, external_anime_id, status, episodes, title,
+                   anime365_series_id, imported_at
+            FROM external_user_rates
+            WHERE user_id=? AND provider=? AND external_rate_id=?
+        """, (user_id, str(provider), str(rate_id))).fetchone()
+        return self._external_rate(row)
+
+    def link_external_user_rate(self, user_id, provider, rate_id, series_id):
+        user_id = self._positive_id(user_id, "user_id")
+        series_id = self._positive_id(series_id, "series_id")
+        if not self.has_watchlist(user_id, series_id):
+            return None
+        with self.db:
+            cursor = self.db.execute("""
+                UPDATE external_user_rates SET anime365_series_id=?
+                WHERE user_id=? AND provider=? AND external_rate_id=?
+            """, (series_id, user_id, str(provider), str(rate_id)))
+        return self.external_user_rate(user_id, provider, rate_id) if cursor.rowcount else None
+
+    def external_rate_for_series(self, user_id, provider, series_id):
+        user_id = self._positive_id(user_id, "user_id")
+        series_id = self._positive_id(series_id, "series_id")
+        row = self.db.execute("""
+            SELECT external_rate_id, external_anime_id, status, episodes, title,
+                   anime365_series_id, imported_at
+            FROM external_user_rates
+            WHERE user_id=? AND provider=? AND anime365_series_id=?
+            ORDER BY imported_at DESC LIMIT 1
+        """, (user_id, str(provider), series_id)).fetchone()
+        return self._external_rate(row)
+
+    def update_external_rate_episodes(self, user_id, provider, rate_id, episodes):
+        user_id = self._positive_id(user_id, "user_id")
+        episodes = max(0, int(episodes))
+        with self.db:
+            self.db.execute("""
+                UPDATE external_user_rates SET episodes=MAX(episodes, ?)
+                WHERE user_id=? AND provider=? AND external_rate_id=?
+            """, (episodes, user_id, str(provider), str(rate_id)))
 
     # Existing global bot settings API. Telegram's polling offset remains global.
     def get(self, name, default=""):
