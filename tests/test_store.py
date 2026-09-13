@@ -62,7 +62,8 @@ class StoreTests(unittest.TestCase):
             "SELECT name FROM sqlite_master WHERE type='table'"
         )}
         self.assertTrue({"users", "settings", "messages", "allowed_users", "user_state",
-                         "watchlist", "watch_episode_state", "notification_outbox"} <= tables)
+                         "watchlist", "watch_episode_state", "notification_outbox",
+                         "anime_external_ids", "external_user_rates"} <= tables)
         self.reopen()
         self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
 
@@ -148,6 +149,26 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.consume_oauth_state("shikimori", "state-which-is-not-a-token", now=2), 1)
         self.assertIsNone(self.store.consume_oauth_state("shikimori", "state-which-is-not-a-token", now=2))
         self.assertNotIn(b"access-secret", (self.directory / "bot.sqlite3").read_bytes())
+
+    def test_external_import_and_mapping_are_private_and_do_not_lower_local_progress(self):
+        self.store.save_external_id(10, "shikimori", "501")
+        self.store.import_external_rates(1, "shikimori", [{
+            "external_rate_id": "101", "external_anime_id": "501", "status": "watching",
+            "episodes": 7, "title": "Imported title",
+        }], now=10)
+        self.assertEqual(self.store.external_series_id("shikimori", "501"), 10)
+        imported = self.store.external_user_rates(1, "shikimori")
+        self.assertEqual(imported[0]["anime365_series_id"], 10)
+        self.assertEqual(imported[0]["episodes"], 7)
+        self.assertEqual(self.store.external_user_rates(2, "shikimori"), [])
+
+        self.store.add_watchlist(1, 10, "Local")
+        linked = self.store.link_external_user_rate(1, "shikimori", "101", 10)
+        self.assertEqual(linked["status"], "watching")
+        self.store.update_external_rate_episodes(1, "shikimori", "101", 5)
+        self.assertEqual(self.store.external_user_rate(1, "shikimori", "101")["episodes"], 7)
+        self.store.update_external_rate_episodes(1, "shikimori", "101", 8)
+        self.assertEqual(self.store.external_rate_for_series(1, "shikimori", 10)["episodes"], 8)
 
     def test_first_notification_baseline_does_not_enqueue_existing_episodes(self):
         episodes = [episode(101, 1), episode(102, 2)]
