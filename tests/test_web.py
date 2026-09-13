@@ -147,10 +147,12 @@ class WebTests(unittest.TestCase):
             {"id": 700, "episodeFull": "7", "episodeInt": 7, "episodeType": "tv"},
             {"id": 701, "episodeFull": "8", "episodeInt": 8, "episodeType": "tv"},
             {"id": 702, "episodeFull": "9", "episodeInt": 9, "episodeType": "tv"},
+            {"id": 703, "episodeFull": "10", "episodeInt": 10, "episodeType": "tv"},
         ])
         self.anime.translations = AsyncMock(side_effect=lambda episode_id: {
             701: [{"id": 801, "type": "subRu", "authorsSummary": "Studio"}],
-            702: [{"id": 802, "type": "voiceRu", "authorsSummary": "Studio"}],
+            702: [{"id": 802, "type": "subRu", "authorsSummary": "Studio"}],
+            703: [{"id": 803, "type": "voiceRu", "authorsSummary": "Studio"}],
         }.get(episode_id, []))
         self.app.state.downloads.enqueue = MagicMock()
         result = self.client.post("/api/travel", headers=self.headers(42), json={
@@ -159,8 +161,10 @@ class WebTests(unittest.TestCase):
         })
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.json()["queued"], 1)
-        self.assertEqual(result.json()["skipped_episodes"], ["9"])
+        self.assertEqual(result.json()["skipped_episodes"], ["10"])
         self.assertEqual(self.app.state.downloads.enqueue.call_count, 1)
+        queued = self.store.list_download_jobs(42)
+        self.assertEqual([job["episode_id"] for job in queued], [702])
         self.store.add_allowed_user(7, owner_id=42)
         denied = self.client.post("/api/travel", headers=self.headers(7), json={
             "series_id": 55, "anchor_episode_id": 701, "translation_id": 801,

@@ -698,7 +698,12 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         if anchor is None or selected is None:
             raise HTTPException(422, "Серия или перевод больше недоступны.")
         profile = _translation_profile(selected)
-        unseen = [row for row in episodes if not _episode_payload(
+        anchor_index = next(index for index, row in enumerate(episodes)
+                            if int(row.get("id", 0)) == payload.anchor_episode_id)
+        # “Next” is defined by the episode the person just selected, rather
+        # than by the 90%-completion marker. A partially watched episode must
+        # therefore still lead to its following episode, never back to #1.
+        unseen = [row for row in episodes[anchor_index + 1:] if not _episode_payload(
             row, watch.get("last_watched_episode_id"), watch.get("last_watched_episode_number"))["watched"]]
         requested = len(unseen) if payload.all_available else payload.count
         chosen = unseen[:min(requested, TRAVEL_BATCH_LIMIT)]
