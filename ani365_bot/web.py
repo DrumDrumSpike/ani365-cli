@@ -27,13 +27,14 @@ from .downloads import DownloadManager
 from .http import HTTPClient
 from .media import MAX_SUBTITLE_FILE, MediaError, _run
 from .shikimori import Shikimori, ShikimoriError
-from .translations import group_translations
+from .translations import group_translations, viewing_type
 
 
 LOG = logging.getLogger(__name__)
 INIT_DATA_MAX_AGE = 24 * 60 * 60
 SESSION_MAX_AGE = 6 * 60 * 60
 TICKET_TTL = 5 * 60
+TRAVEL_BATCH_LIMIT = 25
 
 
 class WebAuthError(ValueError):
@@ -181,6 +182,16 @@ class DownloadRequest(BaseModel):
     delivery: str = Field(pattern="^(browser|telegram)$")
 
 
+class TravelRequest(BaseModel):
+    series_id: int = Field(gt=0)
+    anchor_episode_id: int = Field(gt=0)
+    translation_id: int = Field(gt=0)
+    quality: int = Field(gt=0, le=10000)
+    count: int = Field(default=3, ge=1, le=5)
+    all_available: bool = False
+    delivery: str = Field(pattern="^(browser|telegram)$")
+
+
 class ShikimoriImportRequest(BaseModel):
     statuses: list[str] = Field(default_factory=lambda: ["watching", "planned"], max_length=6)
 
@@ -208,6 +219,21 @@ def _episode_payload(episode, watched_id, watched_number):
         "type": str(episode.get("episodeType") or "tv"),
         "watched": watched,
     }
+
+
+def _translation_profile(item):
+    kind, language = viewing_type(item)
+    author = str(item.get("authorsSummary") or item.get("title") or "").strip().casefold()
+    return kind, language, author
+
+
+def _preferred_translation(rows, profile):
+    """Use the selected studio if present, then safely fall back to its type/language."""
+    same_format = [row for row in rows if _translation_profile(row)[:2] == profile[:2]]
+    if not same_format:
+        return None
+    exact = next((row for row in same_format if _translation_profile(row)[2] == profile[2]), None)
+    return exact or same_format[0]
 
 
 SHIKIMORI_STATUSES = {"planned", "watching", "rewatching", "completed", "on_hold", "dropped"}
@@ -649,6 +675,56 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
             raise HTTPException(404, "Anime is not in your library.")
         app.state.downloads.enqueue(job_id)
         return job
+
+    @app.post("/api/travel")
+    async def travel(payload: TravelRequest, user_id=Depends(authenticated_user)):
+        """Queue a small, explicit batch using an existing translation preference.
+
+        Translation IDs are episode-specific.  The selected anchor therefore
+        supplies a kind/language/studio preference, which is resolved afresh for
+        every following episode rather than incorrectly reusing its ID.
+        """
+        app.state.limiter.check(user_id, "travel", 4)
+        watch = store.get_watchlist(user_id, payload.series_id)
+        if watch is None:
+            raise HTTPException(404, "Anime is not in your library.")
+        try:
+            episodes = await anime.episodes(payload.series_id)
+            anchor = next((row for row in episodes if int(row.get("id", 0)) == payload.anchor_episode_id), None)
+            anchor_rows = await anime.translations(payload.anchor_episode_id) if anchor else ()
+        except APIError as exc:
+            _api_error(exc)
+        selected = next((row for row in anchor_rows if int(row.get("id", 0)) == payload.translation_id), None)
+        if anchor is None or selected is None:
+            raise HTTPException(422, "Серия или перевод больше недоступны.")
+        profile = _translation_profile(selected)
+        unseen = [row for row in episodes if not _episode_payload(
+            row, watch.get("last_watched_episode_id"), watch.get("last_watched_episode_number"))["watched"]]
+        requested = len(unseen) if payload.all_available else payload.count
+        chosen = unseen[:min(requested, TRAVEL_BATCH_LIMIT)]
+        jobs, skipped = [], []
+        for episode in chosen:
+            try:
+                rows = anchor_rows if int(episode["id"]) == payload.anchor_episode_id \
+                    else await anime.translations(int(episode["id"]))
+            except APIError:
+                skipped.append(str(episode.get("episodeFull") or episode.get("episodeInt") or "?"))
+                continue
+            translation = _preferred_translation(rows, profile)
+            if translation is None:
+                skipped.append(str(episode.get("episodeFull") or episode.get("episodeInt") or "?"))
+                continue
+            job_id = secrets.token_urlsafe(24)
+            job = store.create_download_job(
+                job_id, user_id, payload.series_id, int(episode["id"]),
+                str(episode.get("episodeFull") or episode.get("episodeInt") or "?"),
+                int(translation["id"]), payload.quality, payload.delivery)
+            if job:
+                app.state.downloads.enqueue(job_id)
+                jobs.append(job)
+        return {"available": len(unseen), "requested": requested, "queued": len(jobs), "jobs": jobs,
+                "skipped_episodes": skipped, "batch_limited": requested > TRAVEL_BATCH_LIMIT,
+                "message": "Фактический размер станет известен после загрузки."}
 
     @app.get("/api/downloads")
     async def downloads(user_id=Depends(authenticated_user)):
