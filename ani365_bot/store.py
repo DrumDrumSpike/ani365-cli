@@ -6,7 +6,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class StateError(ValueError):
@@ -100,6 +100,11 @@ class Store:
             with self.db:
                 self._create_v6()
                 self.db.execute("PRAGMA user_version = 6")
+            version = 6
+        if version < 7:
+            with self.db:
+                self._create_v7()
+                self.db.execute("PRAGMA user_version = 7")
 
     def _create_v1(self):
         """Initial schema, kept idempotent for pre-versioned installations."""
@@ -319,6 +324,23 @@ class Store:
         self.db.execute("""
             CREATE INDEX IF NOT EXISTS external_user_rates_series_idx
             ON external_user_rates(user_id, provider, anime365_series_id)
+        """)
+
+    def _create_v7(self):
+        """Keep a job title snapshot and allow non-destructive UI cleanup."""
+        self.db.execute("ALTER TABLE download_jobs ADD COLUMN series_title TEXT")
+        self.db.execute("ALTER TABLE download_jobs ADD COLUMN hidden_at REAL")
+        # Preserve a useful title for work queued before this migration whenever
+        # the source watch-list record still exists.
+        self.db.execute("""
+            UPDATE download_jobs AS d SET series_title=(
+                SELECT w.title FROM watchlist AS w
+                WHERE w.user_id=d.user_id AND w.series_id=d.series_id
+            ) WHERE series_title IS NULL
+        """)
+        self.db.execute("""
+            CREATE INDEX IF NOT EXISTS download_jobs_visible_idx
+            ON download_jobs(user_id, hidden_at, created_at DESC)
         """)
 
     @staticmethod
@@ -847,38 +869,53 @@ class Store:
             raise ValueError("Unknown download delivery")
         if not isinstance(job_id, str) or len(job_id) < 16 or len(job_id) > 128:
             raise ValueError("Invalid download job id")
-        if not self.has_watchlist(user_id, series_id):
+        watch = self.get_watchlist(user_id, series_id)
+        if not watch:
             return None
         with self.db:
             self.db.execute("""
                 INSERT INTO download_jobs(
                     id, user_id, series_id, episode_id, episode_number, translation_id,
-                    quality, delivery, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)
+                    quality, delivery, status, created_at, series_title
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
             """, (job_id, user_id, series_id, episode_id, str(episode_number or "?"),
-                  translation_id, quality, delivery, self._now(now)))
+                  translation_id, quality, delivery, self._now(now), watch["title"]))
         return self.download_job(user_id, job_id)
 
     def download_job(self, user_id, job_id):
         user_id = self._positive_id(user_id, "user_id")
         row = self.db.execute("""
             SELECT id, user_id, series_id, episode_id, episode_number, translation_id, quality,
-                   delivery, status, filename, created_at, started_at, finished_at, expires_at, error_code
+                   delivery, status, filename, created_at, started_at, finished_at, expires_at,
+                   error_code, series_title, hidden_at
             FROM download_jobs WHERE id=? AND user_id=?
         """, (str(job_id), user_id)).fetchone()
         if row is None:
             return None
         keys = ("id", "user_id", "series_id", "episode_id", "episode_number", "translation_id",
                 "quality", "delivery", "status", "filename", "created_at", "started_at",
-                "finished_at", "expires_at", "error_code")
+                "finished_at", "expires_at", "error_code", "series_title", "hidden_at")
         return dict(zip(keys, row))
 
     def list_download_jobs(self, user_id, limit=50):
         user_id = self._positive_id(user_id, "user_id")
         limit = max(1, min(100, int(limit)))
-        ids = self.db.execute("SELECT id FROM download_jobs WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
-                              (user_id, limit)).fetchall()
+        ids = self.db.execute("""
+            SELECT id FROM download_jobs
+            WHERE user_id=? AND hidden_at IS NULL ORDER BY created_at DESC LIMIT ?
+        """, (user_id, limit)).fetchall()
         return [self.download_job(user_id, row[0]) for row in ids]
+
+    def hide_finished_download_jobs(self, user_id, now=None):
+        """Hide completed rows from one user's UI while retaining all history."""
+        user_id = self._positive_id(user_id, "user_id")
+        with self.db:
+            cursor = self.db.execute("""
+                UPDATE download_jobs SET hidden_at=?
+                WHERE user_id=? AND hidden_at IS NULL
+                  AND status IN ('ready', 'sent', 'failed', 'cancelled', 'expired')
+            """, (self._now(now), user_id))
+        return cursor.rowcount
 
     def claim_download_job(self, job_id, now=None):
         """Atomically move exactly one queued job to preparing after a restart."""

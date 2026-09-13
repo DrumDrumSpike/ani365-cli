@@ -6,6 +6,7 @@ h1, h2 { margin: 18px 0 10px; } h1 { font-size: 24px; } h2 { font-size: 19px; }
 .status, .empty { padding: 22px 4px; color: var(--tg-theme-hint-color, #a8b3c0); }
 .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
 .card, .panel { background: var(--tg-theme-secondary-bg-color, #243241); border-radius: 14px; padding: 13px; }
+.download-group { margin: 18px 0; }.download-group h2 { margin-bottom: 8px; }.download-group .panel { margin: 8px 0; }
 .card button { width: 100%; text-align: left; background: transparent; color: inherit; border: 0; font: inherit; padding: 0; }
 .meta { color: var(--tg-theme-hint-color, #a8b3c0); font-size: 14px; margin-top: 6px; }
 button, input, select { font: inherit; } button.action { border: 0; border-radius: 10px; padding: 11px 14px; background: var(--tg-theme-button-color, #2ea6ff); color: var(--tg-theme-button-text-color, #fff); margin: 5px 5px 5px 0; }

@@ -172,6 +172,23 @@ class WebTests(unittest.TestCase):
         })
         self.assertEqual(denied.status_code, 404)
 
+    def test_clear_downloads_hides_only_owner_finished_jobs(self):
+        self.store.add_watchlist(42, 55, "Visible title")
+        self.store.add_allowed_user(7, owner_id=42)
+        self.store.add_watchlist(7, 55, "Other title")
+        own = self.store.create_download_job("a" * 16, 42, 55, 700, "7", 800, 1080, "browser")
+        other = self.store.create_download_job("b" * 16, 7, 55, 700, "7", 800, 1080, "browser")
+        self.store.claim_download_job(own["id"])
+        self.store.claim_download_job(other["id"])
+        self.store.finish_download_job(own["id"], "sent")
+        self.store.finish_download_job(other["id"], "sent")
+        response = self.client.post("/api/downloads/clear", headers=self.headers(42))
+        self.assertEqual(response.json(), {"hidden": 1})
+        self.assertEqual(self.client.get("/api/downloads", headers=self.headers(42)).json()["items"], [])
+        visible = self.client.get("/api/downloads", headers=self.headers(7)).json()["items"]
+        self.assertEqual(visible[0]["series_title"], "Other title")
+        self.assertEqual(self.store.download_job(42, own["id"])["status"], "sent")
+
     def test_range_proxy_streams_partial_content_only_for_ticket_owner(self):
         seen = []
 

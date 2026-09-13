@@ -735,6 +735,11 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     async def downloads(user_id=Depends(authenticated_user)):
         return {"items": store.list_download_jobs(user_id)}
 
+    @app.post("/api/downloads/clear")
+    async def clear_finished_downloads(user_id=Depends(authenticated_user)):
+        app.state.limiter.check(user_id, "download-clear", 6)
+        return {"hidden": store.hide_finished_download_jobs(user_id)}
+
     @app.get("/api/downloads/{job_id}")
     async def download_status(job_id: str, user_id=Depends(authenticated_user)):
         job = store.download_job(user_id, job_id)

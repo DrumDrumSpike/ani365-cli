@@ -64,6 +64,8 @@ class StoreTests(unittest.TestCase):
         self.assertTrue({"users", "settings", "messages", "allowed_users", "user_state",
                          "watchlist", "watch_episode_state", "notification_outbox",
                          "anime_external_ids", "external_user_rates"} <= tables)
+        columns = {row[1] for row in self.store.db.execute("PRAGMA table_info(download_jobs)")}
+        self.assertTrue({"series_title", "hidden_at"} <= columns)
         self.reopen()
         self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
 
@@ -169,6 +171,24 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.external_user_rate(1, "shikimori", "101")["episodes"], 7)
         self.store.update_external_rate_episodes(1, "shikimori", "101", 8)
         self.assertEqual(self.store.external_rate_for_series(1, "shikimori", 10)["episodes"], 8)
+
+    def test_finished_downloads_can_be_hidden_without_losing_history_or_title(self):
+        self.store.add_watchlist(1, 10, "Saved title")
+        self.store.add_watchlist(2, 10, "Other user's title")
+        first = self.store.create_download_job("a" * 16, 1, 10, 101, "1", 20, 720, "browser", now=1)
+        second = self.store.create_download_job("b" * 16, 2, 10, 101, "1", 20, 720, "browser", now=1)
+        self.assertEqual(first["series_title"], "Saved title")
+        self.assertEqual(second["series_title"], "Other user's title")
+        self.store.claim_download_job("a" * 16, now=2)
+        self.store.finish_download_job("a" * 16, "sent", now=3)
+        self.assertEqual(len(self.store.list_download_jobs(1)), 1)
+        self.assertEqual(self.store.hide_finished_download_jobs(1, now=4), 1)
+        self.assertEqual(self.store.list_download_jobs(1), [])
+        saved = self.store.download_job(1, "a" * 16)
+        self.assertEqual(saved["status"], "sent")
+        self.assertEqual(saved["series_title"], "Saved title")
+        self.assertEqual(saved["hidden_at"], 4.0)
+        self.assertEqual(len(self.store.list_download_jobs(2)), 1)
 
     def test_first_notification_baseline_does_not_enqueue_existing_episodes(self):
         episodes = [episode(101, 1), episode(102, 2)]
