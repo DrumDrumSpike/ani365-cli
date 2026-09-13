@@ -3,6 +3,7 @@ import tempfile
 import time
 import unittest
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -436,6 +437,19 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         data = [button["callback_data"] for row in message["reply_markup"]["inline_keyboard"]
                 for button in row]
         self.assertEqual(data, ["w:e:7:70", "w:o:7:0", "w:d:7:0"])
+
+    async def test_persistent_notification_mini_app_link_has_only_internal_ids(self):
+        self.bot.config = replace(self.bot.config, mini_app_url="https://anime.example")
+        await self.bot.send_watch_notification({
+            "user_id": 42, "series_id": 7, "episode_id": 70, "episode_number": "14",
+            "mode": "subtitles", "title": "Фрирен",
+        })
+        message = [params for method, params in self.telegram.calls if method == "sendMessage"][-1]
+        web_button = next(button for row in message["reply_markup"]["inline_keyboard"] for button in row
+                          if "web_app" in button)
+        self.assertEqual(web_button["web_app"]["url"],
+                         "https://anime.example?series_id=7&episode_id=70")
+        self.assertNotIn("token", web_button["web_app"]["url"])
 
     async def test_watcher_delivers_through_persistent_bot_notification_sender(self):
         baseline = [{"id": 70, "episodeFull": "13"}]

@@ -189,6 +189,21 @@ class WebTests(unittest.TestCase):
         self.assertEqual(visible[0]["series_title"], "Other title")
         self.assertEqual(self.store.download_job(42, own["id"])["status"], "sent")
 
+    def test_library_notification_settings_are_baselined_and_private(self):
+        self.store.add_watchlist(42, 55, "Title")
+        enabled = self.client.patch("/api/library/55/notifications", headers=self.headers(42),
+                                    json={"enabled": True, "mode": "subtitles"})
+        self.assertEqual(enabled.status_code, 200)
+        self.assertTrue(enabled.json()["notifications_enabled"])
+        self.assertEqual(enabled.json()["notification_mode"], "subtitles")
+        self.assertTrue(enabled.json()["notification_baselined"])
+        self.store.add_allowed_user(7, owner_id=42)
+        self.assertEqual(self.client.patch("/api/library/55/notifications", headers=self.headers(7),
+                                           json={"enabled": True, "mode": "any"}).status_code, 404)
+        disabled = self.client.patch("/api/library/55/notifications", headers=self.headers(42),
+                                     json={"enabled": False, "mode": "subtitles"})
+        self.assertFalse(disabled.json()["notifications_enabled"])
+
     def test_range_proxy_streams_partial_content_only_for_ticket_owner(self):
         seen = []
 
