@@ -601,6 +601,22 @@ class Store:
                                "shikimori_aired_on": row[5]}
                 for row in rows}
 
+    def shikimori_rates_missing_metadata(self, user_id, limit=50):
+        """Return a bounded owner-only batch for shared poster-cache backfill."""
+        user_id = self._positive_id(user_id, "user_id")
+        limit = max(1, min(100, int(limit)))
+        rows = self.db.execute("""
+            SELECT rates.external_anime_id, rates.title
+            FROM external_user_rates AS rates
+            LEFT JOIN external_anime_metadata AS metadata
+              ON metadata.provider=rates.provider AND metadata.external_id=rates.external_anime_id
+            WHERE rates.user_id=? AND rates.provider='shikimori'
+              AND rates.anime365_series_id IS NOT NULL
+              AND (metadata.external_id IS NULL OR metadata.poster_url IS NULL)
+            ORDER BY rates.imported_at DESC LIMIT ?
+        """, (user_id, limit)).fetchall()
+        return [{"external_anime_id": str(row[0]), "title": str(row[1])} for row in rows]
+
     @staticmethod
     def _external_rate(row):
         keys = ("external_rate_id", "external_anime_id", "status", "episodes", "title",

@@ -45,12 +45,20 @@
   async function library() {
     try {
       const data = await api('/api/library');
-      const sections = [['watching', 'Смотрю'], ['rewatching', 'Пересматриваю'], ['planned', 'Запланировано'], ['on_hold', 'Отложено'], ['dropped', 'Брошено'], ['completed', 'Просмотрено']]
-        .filter(([status]) => data.groups?.[status]?.length)
-        .map(([status, label]) => `<h2>${label}</h2>${cards(data.groups[status])}`).join('');
-      root.innerHTML = `<h1>Библиотека</h1>${sections || '<p class="empty">Пока здесь пусто.</p>'}<button class="action secondary back">Назад</button>`;
+      const groups = [['watching', 'Смотрю'], ['rewatching', 'Пересматриваю'], ['planned', 'Запланировано'], ['on_hold', 'Отложено'], ['dropped', 'Брошено'], ['completed', 'Просмотрено']];
+      root.innerHTML = '<h1>Библиотека</h1><input id="library-search" placeholder="Поиск по названию"><div id="library-groups"></div><button class="action secondary back">Назад</button>';
       useBack(); root.querySelector('.back').onclick = home;
-      root.querySelectorAll('[data-series]').forEach(button => button.onclick = () => details(Number(button.dataset.series)));
+      const search = root.querySelector('#library-search');
+      const render = () => {
+        const query = search.value.trim().toLocaleLowerCase();
+        const sections = groups.map(([status, label]) => {
+          const items = (data.groups?.[status] || []).filter(item => !query || String(item.title || '').toLocaleLowerCase().includes(query));
+          return items.length ? `<details class="library-group" open><summary>${label} · ${items.length}</summary>${cards(items)}</details>` : '';
+        }).join('');
+        root.querySelector('#library-groups').innerHTML = sections || '<p class="empty">Ничего не найдено.</p>';
+        root.querySelectorAll('[data-series]').forEach(button => button.onclick = () => details(Number(button.dataset.series)));
+      };
+      search.addEventListener('input', render); render();
     } catch (error) { fail(error); }
   }
   async function search() {

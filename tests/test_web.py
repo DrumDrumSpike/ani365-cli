@@ -360,6 +360,28 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.store.external_user_rate(7, "shikimori", "51")["title"], "Shared title")
         shikimori.animes.assert_not_awaited()
 
+    def test_library_backfills_old_linked_shikimori_posters_in_one_batch(self):
+        self.store.add_watchlist(42, 55, "Old linked title")
+        self.store.save_external_account(42, "shikimori", "access", "refresh", time.time() + 3600, "123")
+        self.store.import_external_rates(42, "shikimori", [{
+            "external_rate_id": "50", "external_anime_id": "700", "status": "watching",
+            "episodes": 1, "title": "Old linked title",
+        }])
+        self.store.link_external_user_rate(42, "shikimori", "50", 55)
+        shikimori = type("Shikimori", (), {})()
+        shikimori.animes = AsyncMock(return_value={"700": {
+            "id": 700, "russian": "Old linked title", "kind": "tv",
+            "image": {"preview": "/system/animes/preview/700.jpg"},
+        }})
+        self.app.state.shikimori = shikimori
+        library = self.client.get("/api/library", headers=self.headers(42))
+        self.assertEqual(library.status_code, 200)
+        self.assertEqual(library.json()["items"][0]["poster_url"],
+                         "https://shikimori.one/system/animes/preview/700.jpg")
+        self.assertEqual(shikimori.animes.await_args.args, (["700"],))
+        self.client.get("/api/library", headers=self.headers(42))
+        self.assertEqual(shikimori.animes.await_count, 1)
+
     def test_card_shikimori_link_is_private_and_does_not_change_global_mapping(self):
         self.store.add_watchlist(42, 55, "Local title")
         self.store.import_external_rates(42, "shikimori", [{

@@ -257,6 +257,9 @@ def _preferred_translation(rows, profile):
 
 
 SHIKIMORI_STATUSES = {"planned", "watching", "rewatching", "completed", "on_hold", "dropped"}
+SHIKIMORI_METADATA_BACKFILL_BATCH = 50
+SHIKIMORI_METADATA_RETRY_SECONDS = 300
+SHIKIMORI_METADATA_REFRESH_SECONDS = 3600
 
 
 def _shikimori_title(rate, anime=None):
@@ -368,6 +371,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     app.state.proxy_transport = proxy_transport
     app.state.shikimori = Shikimori(config.shikimori_client_id, config.shikimori_client_secret,
                                     config.shikimori_redirect_uri)
+    app.state.shikimori_metadata_refresh_after = {}
 
     async def authenticated_user(request: Request,
                                  init_data: str | None = Header(default=None,
@@ -438,6 +442,44 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
             poster_url=public["poster_url"], kind=public["shikimori_kind"],
             aired_on=public["shikimori_aired_on"])
         return store.external_anime_metadata("shikimori", rate["external_anime_id"])
+
+    async def backfill_shikimori_metadata(user_id):
+        """Warm old linked cards in one bounded public request, never per card."""
+        if not store.external_account_status(user_id, "shikimori")["connected"]:
+            return
+        now = time.time()
+        retry_after = app.state.shikimori_metadata_refresh_after
+        pending = store.shikimori_rates_missing_metadata(user_id, SHIKIMORI_METADATA_BACKFILL_BATCH)
+        pending = [item for item in pending
+                   if retry_after.get(item["external_anime_id"], 0) <= now]
+        if not pending:
+            return
+        pending = pending[:SHIKIMORI_METADATA_BACKFILL_BATCH]
+        for item in pending:
+            retry_after[item["external_anime_id"]] = now + SHIKIMORI_METADATA_RETRY_SECONDS
+        try:
+            details = await app.state.shikimori.animes([item["external_anime_id"] for item in pending])
+        except ShikimoriError:
+            for item in pending:
+                retry_after[item["external_anime_id"]] = now + SHIKIMORI_METADATA_RETRY_SECONDS
+            LOG.info("Shikimori metadata backfill unavailable (user=%s count=%s)", user_id, len(pending))
+            return
+        if not isinstance(details, dict):
+            details = {}
+        for item in pending:
+            external = details.get(item["external_anime_id"])
+            if isinstance(external, dict):
+                public = _shikimori_public_metadata(external)
+                cached_title = _shikimori_title({}, external)
+                if cached_title.startswith("Shikimori #"):
+                    cached_title = item["title"]
+                store.save_external_anime_metadata(
+                    "shikimori", item["external_anime_id"], title=cached_title,
+                    poster_url=public["poster_url"], kind=public["shikimori_kind"],
+                    aired_on=public["shikimori_aired_on"])
+                retry_after[item["external_anime_id"]] = now + SHIKIMORI_METADATA_REFRESH_SECONDS
+            else:
+                retry_after[item["external_anime_id"]] = now + SHIKIMORI_METADATA_RETRY_SECONDS
 
     async def sync_shikimori_progress(user_id, series_id, episode_number):
         """Best-effort completion sync; playback is never blocked by Shikimori."""
@@ -690,6 +732,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
 
     @app.get("/api/library")
     async def library(user_id=Depends(authenticated_user)):
+        await backfill_shikimori_metadata(user_id)
         metadata = store.shikimori_library_metadata(user_id)
         items = [{**item, **metadata.get(item["series_id"], {})}
                  for item in store.list_watchlist(user_id)]
