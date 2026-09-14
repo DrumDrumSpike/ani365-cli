@@ -16,3 +16,5 @@ deploy.env.*
 document-api/document.yaml
 debug
 debug/
+web-static for bot/
+web-static for bot
