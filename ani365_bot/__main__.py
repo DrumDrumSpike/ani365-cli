@@ -18,8 +18,6 @@ async def main():
     (config.data_dir / "status.json").unlink(missing_ok=True)
     store = Store(config.data_dir)
     try:
-        # Fail before polling if the saved credential cannot be decrypted.
-        store.token(config.owner_id)
         client = HTTPClient()
         media = MediaProcessor(config.media_dir)
         # No media task can still be active when this process has just started.

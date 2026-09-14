@@ -149,17 +149,18 @@ class ShapeTests(unittest.TestCase):
         self.assertEqual(source.subtitle_url, "https://smotret-anime.app/subtitles.ass")
 
     def test_config_accepts_existing_env_names_without_api_id(self):
-        with patch.dict(os.environ, {"token_BotFather": "fake:token", "TELEGRAM_ID": "42"}, clear=True):
+        with patch.dict(os.environ, {"token_BotFather": "fake:token", "TELEGRAM_ID": "42",
+                                    "ANI365_TOKEN": "shared-token"}, clear=True):
             cfg = Config.from_env()
         self.assertEqual(cfg.owner_id, 42)
         self.assertEqual(cfg.bot_token, "fake:token")
 
     def test_watch_check_interval_is_configurable_and_positive(self):
         with patch.dict(os.environ, {"BOT_TOKEN": "fake:token", "OWNER_ID": "42",
-                                    "WATCH_CHECK_INTERVAL": "17"}, clear=True):
+                                    "WATCH_CHECK_INTERVAL": "17", "ANI365_TOKEN": "shared-token"}, clear=True):
             self.assertEqual(Config.from_env().watch_check_interval, 17)
         with patch.dict(os.environ, {"BOT_TOKEN": "fake:token", "OWNER_ID": "42",
-                                    "WATCH_CHECK_INTERVAL": "0"}, clear=True):
+                                    "WATCH_CHECK_INTERVAL": "0", "ANI365_TOKEN": "shared-token"}, clear=True):
             with self.assertRaises(ValueError):
                 Config.from_env()
 
@@ -169,6 +170,9 @@ class ShapeTests(unittest.TestCase):
                 Config.from_env()
             self.assertNotIn("secret", str(raised.exception))
         with patch.dict(os.environ, {"BOT_TOKEN": "fake:token", "OWNER_ID": "42", "ANI365_BASE_URL": "http://example.org"}, clear=True):
+            with self.assertRaises(ValueError):
+                Config.from_env()
+        with patch.dict(os.environ, {"BOT_TOKEN": "fake:token", "OWNER_ID": "42"}, clear=True):
             with self.assertRaises(ValueError):
                 Config.from_env()
 

@@ -164,7 +164,7 @@ class Anime365:
                     continue
                 raise APIError("Anime365 недоступен. Попробуй позже.") from None
             if response.status_code in (401, 403):
-                raise APIError("Anime365 отклонил доступ. Проверь токен (/auth) и подписку.", response.status_code)
+                raise APIError("Anime365 отклонил доступ. Проверь ANI365_TOKEN и подписку.", response.status_code)
             if response.status_code == 404:
                 raise APIError("На Anime365 этот материал больше не найден.", 404)
             if response.status_code == 429 or response.status_code >= 500:

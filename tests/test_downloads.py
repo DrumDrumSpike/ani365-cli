@@ -47,9 +47,8 @@ class DownloadManagerTests(unittest.IsolatedAsyncioTestCase):
         root = Path(self.temp.name)
         self.store = Store(root / "data")
         self.config = Config("123:token", 1, data_dir=root / "data", media_dir=root / "jobs",
-                             download_workers=2, download_ttl=60)
+                             download_workers=2, download_ttl=60, anime_token="server-anime365-token")
         self.store.add_watchlist(1, 10, "Title")
-        self.store.save_token(1, "encrypted-token")
         self.gate = asyncio.Event()
         self.media = FakeMedia(root / "jobs", self.gate)
         self.anime = type("Anime", (), {})()

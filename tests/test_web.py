@@ -4,6 +4,7 @@ import json
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlencode
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -37,7 +38,8 @@ class WebTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.store = Store(Path(self.temp.name))
         self.config = Config(BOT_TOKEN, 42, data_dir=Path(self.temp.name),
-                             media_dir=Path(self.temp.name) / "jobs", web_cookie_secure=False)
+                             media_dir=Path(self.temp.name) / "jobs", web_cookie_secure=False,
+                             anime_token="server-anime365-token")
         self.anime = type("Anime", (), {})()
         self.anime.search = AsyncMock(return_value=[])
         self.anime.episodes = AsyncMock(return_value=[{
@@ -75,6 +77,22 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/me", headers=self.headers(99)).status_code, 200)
         self.store.revoke_allowed_user(99, 42)
         self.assertEqual(self.client.get("/api/library", headers=self.headers(99)).status_code, 403)
+
+    def test_shared_config_anime365_token_serves_allowed_user_without_personal_token(self):
+        self.store.add_allowed_user(7, owner_id=42)
+        self.store.add_watchlist(7, 55, "Shared token title")
+        config = replace(self.config, anime_token="server-anime365-token")
+        app = create_app(config, self.store, self.anime)
+        client = TestClient(app)
+        try:
+            result = client.post("/api/play", headers=self.headers(7), json={
+                "series_id": 55, "episode_id": 700, "translation_id": 800, "quality": 1080,
+            })
+        finally:
+            client.close()
+        self.assertEqual(result.status_code, 200)
+        self.anime.media_source.assert_awaited_with(800, 1080, "server-anime365-token")
+        self.assertIsNone(self.store.token(7))
 
     def test_cross_user_library_and_stream_ticket_are_not_visible(self):
         self.store.add_allowed_user(7, owner_id=42)

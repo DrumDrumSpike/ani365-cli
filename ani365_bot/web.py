@@ -408,9 +408,9 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         return user_id
 
     def require_token(user_id):
-        token = store.token(user_id)
+        token = config.anime_token
         if not token:
-            raise HTTPException(409, "Сначала подключите Anime365 через /auth в боте.")
+            raise HTTPException(409, "Anime365 token is not configured on the server.")
         return token
 
     async def shikimori_account(user_id):
@@ -729,7 +729,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         response.set_cookie("ani365_mini_session", app.state.sessions.create(user_id),
                             max_age=SESSION_MAX_AGE, httponly=True, secure=config.web_cookie_secure,
                             samesite="strict", path="/")
-        return {"user_id": user_id, "anime365_connected": bool(store.token(user_id))}
+        return {"user_id": user_id, "anime365_connected": bool(config.anime_token)}
 
     @app.get("/api/shikimori/status")
     async def shikimori_status(user_id=Depends(authenticated_user)):

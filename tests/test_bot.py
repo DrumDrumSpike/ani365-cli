@@ -65,7 +65,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.telegram = FakeTelegram()
         self.anime = AsyncMock()
         self.media = FakeMedia(self.directory)
-        self.bot = Bot(Config("fake:token", 42, self.directory), self.store, self.telegram,
+        self.bot = Bot(Config("fake:token", 42, self.directory, anime_token="server-anime365-token"), self.store, self.telegram,
                        self.anime, self.media)
 
     def tearDown(self):
@@ -94,28 +94,28 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.due(True), [])
         self.anime.validate.assert_not_called()
 
-    async def test_auth_deletes_incoming_before_validation_and_encrypts_token(self):
-        await self.bot.handle(self.message("/start"))
-        self.assertEqual(self.store.get("awaiting_token"), "1")
+    async def test_shared_config_token_allows_allowlisted_search_without_personal_token(self):
+        self.bot.config = replace(self.bot.config, anime_token="server-anime365-token")
+        self.store.add_allowed_user(43, owner_id=42)
+        self.anime.search.return_value = [{"id": 1, "titles": {"ru": "Аниме"}}]
+        await self.bot.handle(self.message("Аниме", user=43, chat=43))
+        self.assertEqual(self.bot.sessions[43].stage, "series")
+        self.assertIsNone(self.store.token(43))
 
-        async def validate(token):
-            self.assertIn(("deleteMessage", {"chat_id": 42, "message_id": 2}), self.telegram.calls)
-            self.assertEqual(token, "test-anime-secret")
+    async def test_auth_reports_shared_server_connection_without_storing_personal_token(self):
+        await self.bot.handle(self.message("/auth"))
+        self.anime.validate.assert_not_awaited()
+        self.assertFalse(self.store.awaiting_token(42))
+        self.assertIn("Anime365 подключён на сервере",
+                      [params["text"] for method, params in self.telegram.calls if method == "sendMessage"][-1])
 
-        self.anime.validate.side_effect = validate
-        await self.bot.handle(self.message("test-anime-secret", mid=2))
-        self.assertEqual(self.store.token(42), "test-anime-secret")
-        self.assertEqual(self.store.get("awaiting_token"), "0")
-        self.assertNotIn(b"test-anime-secret", (self.directory / "bot.sqlite3").read_bytes())
-        self.assertNotIn("test-anime-secret", repr(self.telegram.calls))
-
-    async def test_bad_replacement_keeps_previous_token_and_waits_for_retry(self):
+    async def test_personal_token_message_is_not_validated_or_saved(self):
         self.store.save_token(42, "previous")
         await self.bot.handle(self.message("/auth"))
-        self.anime.validate.side_effect = APIError("Токен не прошёл проверку", 401)
+        self.anime.search.return_value = []
         await self.bot.handle(self.message("invalid", mid=2))
         self.assertEqual(self.store.token(42), "previous")
-        self.assertEqual(self.store.get("awaiting_token"), "1")
+        self.anime.validate.assert_not_awaited()
 
     async def test_restart_preserves_authorization_and_deletion_queue(self):
         self.store.save_token(42, "saved")
@@ -153,7 +153,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             await self.bot.handle(self.callback())
         self.assertEqual(self.bot.session.stage, "qualities")
         self.assertEqual(self.bot.session.message_id, first_id)
-        self.anime.available_qualities.assert_awaited_once_with(3, "saved")
+        self.anime.available_qualities.assert_awaited_once_with(3, "server-anime365-token")
         self.telegram.upload_status_error = APIError("temporary")
         await self.bot.handle(self.callback(index=1))
         self.assertIsNone(self.bot.session)
@@ -161,7 +161,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("720p", upload["caption"])
         self.assertIn("Тип просмотра: Субтитры · Русский", upload["caption"])
         self.assertTrue(upload["document"].startswith("file:///"))
-        self.anime.media_source.assert_awaited_once_with(3, 720, "saved")
+        self.anime.media_source.assert_awaited_once_with(3, 720, "server-anime365-token")
         self.assertEqual(self.media.calls[0][2:], (True, "ru"))
         progress = self.store.get_watchlist(42, 1)
         self.assertEqual((progress["last_watched_episode_id"], progress["last_watched_episode_number"]), (2, "1"))
@@ -215,7 +215,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.bot.handle(stale_type_callback)
         self.assertEqual(self.bot.session.stage, "translations")
         await self.bot.handle(self.callback(index=1))
-        self.anime.available_qualities.assert_awaited_once_with(12, "saved")
+        self.anime.available_qualities.assert_awaited_once_with(12, "server-anime365-token")
         await self.bot.handle(self.callback("back"))
         await self.bot.handle(self.callback("back"))
         self.assertEqual(self.bot.session.stage, "translation_types")
@@ -224,7 +224,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.bot.handle(self.callback(index=1))
         self.assertEqual([t["id"] for t in self.bot.session.items], [11])
         await self.bot.handle(self.callback())
-        self.anime.available_qualities.assert_awaited_with(11, "saved")
+        self.anime.available_qualities.assert_awaited_with(11, "server-anime365-token")
         self.assertEqual(self.bot.session.message_id, menu_id)
         # Fetch once per episode, then filter locally when changing types.
         self.anime.translations.assert_awaited_once_with(2)
@@ -291,11 +291,11 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.due(True), [])
         self.assertEqual([p["message_id"] for m, p in self.telegram.calls if m == "deleteMessage"], [2])
 
-    async def test_logout_forgets_token_and_cancels_menu(self):
+    async def test_logout_keeps_legacy_token_unused_and_cancels_menu(self):
         self.store.save_token(42, "saved")
         self.bot.session = Session("series", [{"id": 1}])
         await self.bot.handle(self.message("/logout"))
-        self.assertIsNone(self.store.token(42))
+        self.assertEqual(self.store.token(42), "saved")
         self.assertIsNone(self.bot.session)
 
     async def test_update_drain_blocks_new_search_but_allows_cancel(self):
@@ -317,10 +317,10 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("43", users_notice)
 
         await self.bot.handle(self.message("/start", user=43, chat=43, mid=3))
-        self.assertTrue(self.store.awaiting_token(43))
+        self.assertFalse(self.store.awaiting_token(43))
         self.assertFalse(self.store.awaiting_token(42))
         await self.bot.handle(self.message("user-token", user=43, chat=43, mid=4))
-        self.assertEqual(self.store.token(43), "user-token")
+        self.assertIsNone(self.store.token(43))
         self.assertIsNone(self.store.token(42))
 
         self.store.save_token(42, "owner-token")

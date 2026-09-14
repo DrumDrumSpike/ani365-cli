@@ -228,10 +228,13 @@ class Bot:
 
     async def request_auth(self, user_id=None):
         user_id = self._user(user_id)
-        self._set_awaiting_token(user_id, True)
-        await self.notice("Отправь токен доступа Anime365 отдельным сообщением. "
-                          "Я удалю сообщение сразу и проверю токен. Отмена: /cancel.",
+        self._set_awaiting_token(user_id, False)
+        await self.notice("Anime365 подключён общим токеном сервера. Токен доступен только backend.",
                           MENU_TTL, user_id)
+
+    def _anime_token(self, user_id):
+        """Use one configured server credential, never a per-user credential."""
+        return self.config.anime_token
 
     def _private_user(self, callback, message):
         source = callback or message or {}
@@ -316,8 +319,8 @@ class Bot:
             await self.reset(user_id)
             self._set_awaiting_token(user_id, False)
             if command == "/logout":
-                self.store.forget_token(user_id)
-                await self.notice("Токен Anime365 удалён из базы. Для подключения: /start.", user_id=user_id)
+                await self.notice("Anime365 настроен общим токеном сервера. /logout не меняет доступ.",
+                                  user_id=user_id)
             else:
                 await self.notice("Отменено. Для нового поиска напиши название аниме.", user_id=user_id)
             return
@@ -326,15 +329,16 @@ class Bot:
             return
         if command in ("/start", "/auth", "/help"):
             await self.reset(user_id)
-            if command == "/auth" or not self.store.token(user_id):
-                await self.request_auth(user_id)
+            if command == "/auth":
+                await self.notice("Anime365 подключён на сервере. Можно сразу искать аниме или открыть каталог.",
+                                  MENU_TTL, user_id)
             else:
                 self._set_awaiting_token(user_id, False)
                 help_text = (
                     "Напиши название аниме, затем выбери тайтл, серию, тип просмотра, перевод и качество.\n"
                     "После выбора качества я соберу и отправлю MKV.\n"
                     "/watching — список «Смотрю»; /notifications — настройки уведомлений.\n"
-                    "/auth — заменить токен; /logout — удалить токен; /cancel — очистить меню.")
+                    "/auth — состояние Anime365; /logout — очистить меню; /cancel — очистить меню.")
                 if user_id == self.config.owner_id:
                     help_text += "\n/allow <id>, /revoke <id>, /users — управление allowlist."
                 markup = None
@@ -345,13 +349,13 @@ class Bot:
                 await self.notice(help_text, MENU_TTL, user_id, markup)
             return
         if command == "/watching":
-            if not self.store.token(user_id):
+            if not self._anime_token(user_id):
                 await self.request_auth(user_id)
                 return
             await self.show_watchlist(user_id)
             return
         if command == "/notifications":
-            if not self.store.token(user_id):
+            if not self._anime_token(user_id):
                 await self.request_auth(user_id)
                 return
             await self.show_watchlist(user_id, notifications=True)
@@ -359,21 +363,8 @@ class Bot:
         if command:
             await self.notice("Неизвестная команда. Справка: /help.", user_id=user_id)
             return
-        if self._awaiting_token(user_id):
-            await self.reset(user_id)
-            if not text or len(text) > 4096 or any(char.isspace() for char in text):
-                await self.notice("Нужен один токен Anime365 без пробелов. Пришли его текстовым сообщением.",
-                                  user_id=user_id)
-                return
-            await self.anime.validate(text)
-            self.store.save_token(user_id, text)
-            self._set_awaiting_token(user_id, False)
-            await self.notice("Токен проверен и сохранён. Напиши название аниме.", MENU_TTL, user_id)
-            return
-        if not self.store.token(user_id):
-            await self.reset(user_id)
-            await self.request_auth(user_id)
-            return
+        if not self._anime_token(user_id):
+            raise APIError("Anime365 token is not configured on the server.")
         await self.reset(user_id)
         if not text or len(text) > 200:
             await self.notice("Пришли название аниме текстом, до 200 символов.", user_id=user_id)
@@ -756,9 +747,9 @@ class Bot:
                                  text=summary + "\n\nСкачиваю и собираю файл…",
                                  reply_markup={"inline_keyboard": []})
         session.touched = time.time()
-        token = self.store.token(user_id)
+        token = self._anime_token(user_id)
         if not token:
-            raise APIError("Сначала подключи Anime365: /start.")
+            raise APIError("Anime365 token is not configured on the server.")
         heartbeat = asyncio.create_task(self.busy_heartbeat())
         try:
             source = await self.anime.media_source(selected["translations"]["id"], quality, token)
@@ -815,9 +806,9 @@ class Bot:
             rows, stage = item.translations, "translations"
             empty = "Для этого типа просмотра нет доступных вариантов. Выбери другой."
         else:
-            token = self.store.token(user_id)
+            token = self._anime_token(user_id)
             if not token:
-                raise APIError("Сначала подключи Anime365: /start.")
+                raise APIError("Anime365 token is not configured on the server.")
             rows, stage = await self.anime.available_qualities(item["id"], token), "qualities"
             empty = "Для перевода не найдены доступные разрешения. Попробуй другой перевод."
         if not rows:

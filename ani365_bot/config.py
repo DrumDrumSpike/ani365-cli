@@ -26,6 +26,7 @@ class Config:
     shikimori_client_secret: str = ""
     shikimori_redirect_uri: str = ""
     shikimori_import_interval: int = 12 * 60 * 60
+    anime_token: str = ""
 
     @classmethod
     def from_env(cls):
@@ -40,6 +41,10 @@ class Config:
         parsed = urlsplit(url)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.query or parsed.fragment:
             raise ConfigError("ANI365_BASE_URL must be an HTTPS API base URL")
+        anime_token = os.environ.get("ANI365_TOKEN") or os.environ.get("ANI365_ACCESS_TOKEN", "")
+        anime_token = anime_token.strip()
+        if not anime_token or len(anime_token) > 4096 or any(char.isspace() for char in anime_token):
+            raise ConfigError("Set ANI365_TOKEN to one Anime365 access token in .env")
         telegram_url = os.environ.get("TELEGRAM_BOT_API_URL", cls.telegram_url).rstrip("/")
         telegram = urlsplit(telegram_url)
         if (telegram.scheme not in ("http", "https") or not telegram.hostname or telegram.username
@@ -96,4 +101,4 @@ class Config:
                    telegram_url, Path(os.environ.get("MEDIA_DIR", "/jobs")), watch_check_interval,
                    mini_app_url, cookie_secure in ("1", "true", "yes"), completion_threshold,
                    download_workers, download_ttl, shikimori_id, shikimori_secret, shikimori_redirect,
-                   shikimori_import_interval)
+                   shikimori_import_interval, anime_token)

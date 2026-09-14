@@ -69,9 +69,9 @@ class DownloadManager:
             if not job:
                 return
             try:
-                token = self.store.token(job["user_id"])
+                token = self.config.anime_token
                 if not token:
-                    raise APIError("Сначала подключите Anime365 через /auth в боте.")
+                    raise APIError("Anime365 token is not configured on the server.")
                 source = await self.anime.media_source(job["translation_id"], job["quality"], token)
                 translations = await self.anime.translations(job["episode_id"])
                 translation = next((row for row in translations
