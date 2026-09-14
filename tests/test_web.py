@@ -297,6 +297,25 @@ variants/720.m3u8?signature=private
         self.assertIn("https://cdn.example/master.m3u8?signature=private", seen)
         self.assertIn("https://cdn.example/segments/one.ts?signature=private", seen)
 
+    def test_hls_proxy_rejects_unsafe_child_urls_without_fetching_them(self):
+        seen = []
+
+        def upstream(request):
+            seen.append(str(request.url))
+            return httpx.Response(200, headers={"content-type": "application/vnd.apple.mpegurl"},
+                                  text="#EXTM3U\n#EXTINF:6,\nhttp://127.0.0.1/private.ts\n")
+
+        app = create_app(self.config, self.store, self.anime,
+                         proxy_transport=httpx.MockTransport(upstream))
+        client = TestClient(app)
+        try:
+            ticket = app.state.tickets.create(42, "https://cdn.example/master.m3u8")
+            response = client.get(f"/api/stream/{ticket}", headers=self.headers(42))
+        finally:
+            client.close()
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(seen, ["https://cdn.example/master.m3u8"])
+
     def test_shikimori_status_is_private_and_unconfigured_connect_is_rejected(self):
         status = self.client.get("/api/shikimori/status", headers=self.headers(42))
         self.assertEqual(status.json(), {

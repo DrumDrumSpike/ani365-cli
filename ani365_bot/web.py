@@ -8,6 +8,7 @@ for the selected direct-playback URL returned to its authenticated owner.
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import re
@@ -162,8 +163,14 @@ def _hls_target(base_url, value):
     """Resolve an upstream playlist reference; the browser never supplies it."""
     target = urljoin(base_url, str(value).strip())
     parts = urlsplit(target)
-    if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
+    if parts.scheme != "https" or not parts.hostname or parts.username or parts.password \
+            or parts.hostname.casefold() == "localhost":
         return None
+    try:
+        if not ipaddress.ip_address(parts.hostname).is_global:
+            return None
+    except ValueError:
+        pass
     return target
 
 
