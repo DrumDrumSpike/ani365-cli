@@ -484,6 +484,16 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
                 "upstream_series_id": int(item["series_id"]) - HENTAI_SERIES_OFFSET
                 if provider == "hentai365" else int(item["series_id"])}
 
+    def hentai_poster(row):
+        value = row.get("posterUrlSmall") or row.get("posterUrl")
+        parts = urlsplit(value) if isinstance(value, str) else None
+        hosts = {urlsplit(config.hentai_url).hostname, "hentai365.ru", "h365-art.org"}
+        if not parts or parts.scheme != "https" or parts.hostname not in hosts \
+                or parts.username or parts.password or parts.query or parts.fragment \
+                or not parts.path.startswith("/posters/"):
+            return None
+        return value
+
     def require_shikimori_series(series_id):
         if is_hentai_series(series_id):
             raise HTTPException(404, "Shikimori недоступен для этого каталога.")
@@ -1108,8 +1118,14 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
     async def library(user_id=Depends(authenticated_user)):
         await backfill_shikimori_metadata(user_id)
         metadata = store.shikimori_library_metadata(user_id)
-        items = [{**source_item(item), **({} if is_hentai_series(item["series_id"])
-                 else metadata.get(item["series_id"], {}))} for item in store.list_watchlist(user_id)]
+        watched = store.list_watchlist(user_id)
+        hentai_metadata = store.external_anime_metadata_many(
+            "hentai365", [int(item["series_id"]) - HENTAI_SERIES_OFFSET for item in watched
+                          if is_hentai_series(item["series_id"])])
+        items = [{**source_item(item), **(
+                 {"poster_url": hentai_metadata.get(str(int(item["series_id"]) - HENTAI_SERIES_OFFSET), {}).get("poster_url")}
+                 if is_hentai_series(item["series_id"])
+                 else metadata.get(item["series_id"], {}))} for item in watched]
         # A local title without Shikimori status remains "watching", preserving
         # the old bot workflow. Once a status exists, Shikimori is the source
         # of truth for its library section.
@@ -1120,7 +1136,9 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
             groups[status if status in SHIKIMORI_STATUSES else "watching"].append(item)
         active = groups["watching"] + groups["rewatching"]
         active_ids = {item["series_id"] for item in active}
-        recent = [{**source_item(item), **({} if is_hentai_series(item["series_id"])
+        recent = [{**source_item(item), **(
+                  {"poster_url": hentai_metadata.get(str(int(item["series_id"]) - HENTAI_SERIES_OFFSET), {}).get("poster_url")}
+                  if is_hentai_series(item["series_id"])
                   else metadata.get(item["series_id"], {}))} for item in store.recent_playback(user_id)
                   if item["series_id"] in active_ids]
         new_episodes = [item for item in active
@@ -1301,29 +1319,30 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
             rows = await hentai.search(query.strip())
         except APIError as exc:
             _api_error(exc)
-        origin = urlsplit(config.hentai_url)
-
-        def poster(row):
-            value = row.get("posterUrlSmall") or row.get("posterUrl")
-            parts = urlsplit(value) if isinstance(value, str) else None
-            if not parts or parts.scheme != "https" or parts.hostname != origin.hostname \
-                    or parts.username or parts.password or parts.query or parts.fragment \
-                    or not parts.path.startswith("/posters/"):
-                return None
-            return value
-
-        return {"items": [{
-            "series_id": public_series_id("hentai365", row["id"]), "title": title(row),
-            "year": row.get("year"), "series_type": row.get("typeTitle") or row.get("type"),
-            "poster_url": poster(row), "provider": "hentai365",
-        } for row in rows if str(row.get("id", "")).isdigit()]}
+        items = []
+        for row in rows:
+            if not str(row.get("id", "")).isdigit():
+                continue
+            poster_url = hentai_poster(row)
+            external_id = str(row["id"])
+            store.save_external_anime_metadata("hentai365", external_id, title=title(row),
+                                               poster_url=poster_url)
+            items.append({
+                "series_id": public_series_id("hentai365", row["id"]), "title": title(row),
+                "year": row.get("year"), "series_type": row.get("typeTitle") or row.get("type"),
+                "poster_url": poster_url, "provider": "hentai365",
+            })
+        return {"items": items}
 
     @app.get("/api/library/{series_id}")
     async def library_item(series_id: int, user_id=Depends(authenticated_user)):
         item = store.get_watchlist(user_id, series_id)
         if item is None:
             raise HTTPException(404, "Anime is not in your library.")
-        item = {**source_item(item), **({} if is_hentai_series(series_id)
+        item = {**source_item(item), **(
+                {"poster_url": (store.external_anime_metadata(
+                    "hentai365", int(series_id) - HENTAI_SERIES_OFFSET) or {}).get("poster_url")}
+                if is_hentai_series(series_id)
                 else store.shikimori_library_metadata(user_id).get(series_id, {}))}
         try:
             source, _token, upstream_series_id, _provider = source_for_series(series_id)

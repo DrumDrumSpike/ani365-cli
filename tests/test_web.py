@@ -99,7 +99,7 @@ class WebTests(unittest.TestCase):
         hentai = type("Hentai", (), {})()
         hentai.search = AsyncMock(return_value=[{
             "id": 55, "titles": {"ru": "Отдельный каталог"}, "year": 2026,
-            "typeTitle": "TV", "posterUrlSmall": "https://hentai365.ru/posters/55.jpg",
+            "typeTitle": "TV", "posterUrlSmall": "https://h365-art.org/posters/55.jpg",
         }])
         hentai.episodes = AsyncMock(return_value=[{
             "id": 1700, "episodeFull": "1", "episodeInt": 1,
@@ -116,6 +116,7 @@ class WebTests(unittest.TestCase):
             self.assertEqual(catalog.status_code, 200)
             item = catalog.json()["items"][0]
             self.assertEqual(item["series_id"], 1_000_000_000_055)
+            self.assertEqual(item["poster_url"], "https://h365-art.org/posters/55.jpg")
             self.assertNotIn("hentai-secret", catalog.text)
             added = client.post("/api/library", headers=self.headers(42), json={
                 "series_id": item["series_id"], "title": item["title"], "provider": "hentai365",
@@ -124,6 +125,9 @@ class WebTests(unittest.TestCase):
             detail = client.get(f"/api/library/{item['series_id']}", headers=self.headers(42))
             self.assertEqual(detail.status_code, 200)
             self.assertEqual(detail.json()["item"]["provider"], "hentai365")
+            self.assertEqual(detail.json()["item"]["poster_url"], "https://h365-art.org/posters/55.jpg")
+            library = client.get("/api/library", headers=self.headers(42))
+            self.assertEqual(library.json()["items"][0]["poster_url"], "https://h365-art.org/posters/55.jpg")
             hentai.episodes.assert_awaited_with(55)
             play = client.post("/api/play", headers=self.headers(42), json={
                 "series_id": item["series_id"], "episode_id": 1700, "translation_id": 1800, "quality": 720,
