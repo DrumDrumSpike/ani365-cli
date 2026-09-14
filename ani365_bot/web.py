@@ -712,14 +712,16 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
 
     @app.get("/")
     async def index():
-        return FileResponse(Path(__file__).with_name("web_static") / "index.html")
+        return FileResponse(Path(__file__).with_name("web_static") / "index.html",
+                            headers={"Cache-Control": "no-store, max-age=0"})
 
     @app.get("/assets/{asset_name}")
     async def assets(asset_name: str):
         allowed = {"app.js", "app.css"}
         if asset_name not in allowed:
             raise HTTPException(404, "Not found")
-        return FileResponse(Path(__file__).with_name("web_static") / asset_name)
+        return FileResponse(Path(__file__).with_name("web_static") / asset_name,
+                            headers={"Cache-Control": "no-store, max-age=0"})
 
     @app.get("/api/me")
     async def me(response: Response, user_id=Depends(authenticated_user)):
