@@ -228,9 +228,25 @@ class WebTests(unittest.TestCase):
 
     def test_shikimori_status_is_private_and_unconfigured_connect_is_rejected(self):
         status = self.client.get("/api/shikimori/status", headers=self.headers(42))
-        self.assertEqual(status.json(), {"configured": False, "connected": False})
+        self.assertEqual(status.json(), {
+            "configured": False, "connected": False, "background_import": None,
+        })
         self.assertEqual(self.client.post("/api/shikimori/connect", headers=self.headers(42)).status_code, 409)
         self.assertEqual(self.client.get("/api/shikimori/status", headers=self.headers(99)).status_code, 403)
+
+    def test_background_shikimori_import_is_owner_bound_and_durable(self):
+        self.store.save_external_account(42, "shikimori", "access", "refresh", time.time() + 3600, "123")
+        shikimori = type("Shikimori", (), {})()
+        shikimori.user_rates = AsyncMock(return_value=[])
+        self.app.state.shikimori = shikimori
+        queued = self.client.post("/api/shikimori/import/background", headers=self.headers(42),
+                                  json={"statuses": ["watching", "planned"]})
+        self.assertEqual(queued.status_code, 202)
+        self.assertEqual(set(queued.json()["background_import"]["statuses"]), {"watching", "planned"})
+        self.assertIsNotNone(self.store.external_import_state(42, "shikimori"))
+        self.store.add_allowed_user(7, owner_id=42)
+        self.assertEqual(self.client.post("/api/shikimori/import/background", headers=self.headers(7),
+                                          json={"statuses": ["watching"]}).status_code, 409)
 
     def test_shikimori_sync_setting_is_private_and_persistent(self):
         self.store.save_external_account(42, "shikimori", "access", "refresh", time.time() + 3600, "123")

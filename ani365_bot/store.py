@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import time
@@ -6,7 +7,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 class StateError(ValueError):
@@ -115,6 +116,11 @@ class Store:
             with self.db:
                 self._create_v9()
                 self.db.execute("PRAGMA user_version = 9")
+            version = 9
+        if version < 10:
+            with self.db:
+                self._create_v10()
+                self.db.execute("PRAGMA user_version = 10")
 
     def _create_v1(self):
         """Initial schema, kept idempotent for pre-versioned installations."""
@@ -371,6 +377,28 @@ class Store:
         """Reuse one public Shikimori title cache between all local users."""
         self.db.execute("ALTER TABLE external_anime_metadata ADD COLUMN title TEXT")
 
+    def _create_v10(self):
+        """Persist non-secret background import scheduling across web restarts."""
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS external_import_state (
+                user_id INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                statuses TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('queued', 'running', 'ready', 'failed')),
+                requested_at REAL NOT NULL,
+                started_at REAL,
+                finished_at REAL,
+                next_run_at REAL NOT NULL,
+                imported_count INTEGER NOT NULL DEFAULT 0 CHECK(imported_count >= 0),
+                last_error TEXT,
+                PRIMARY KEY(user_id, provider)
+            )
+        """)
+        self.db.execute("""
+            CREATE INDEX IF NOT EXISTS external_import_state_due_idx
+            ON external_import_state(provider, next_run_at)
+        """)
+
     @staticmethod
     def _now(value):
         return time.time() if value is None else float(value)
@@ -500,6 +528,114 @@ class Store:
     def forget_external_account(self, user_id, provider):
         with self.db:
             self.db.execute("DELETE FROM external_accounts WHERE user_id=? AND provider=?",
+                            (self._positive_id(user_id, "user_id"), str(provider)))
+
+    def external_account_user_ids(self, provider):
+        """Return account owners without ever reading their encrypted tokens."""
+        rows = self.db.execute("SELECT user_id FROM external_accounts WHERE provider=?",
+                               (str(provider),)).fetchall()
+        return [int(row[0]) for row in rows]
+
+    @staticmethod
+    def _external_import_state(row):
+        if not row:
+            return None
+        try:
+            statuses = json.loads(row[0])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            statuses = []
+        if not isinstance(statuses, list):
+            statuses = []
+        return {"statuses": [str(value) for value in statuses], "state": str(row[1]),
+                "requested_at": float(row[2]), "started_at": row[3], "finished_at": row[4],
+                "next_run_at": float(row[5]), "imported_count": int(row[6]),
+                "last_error": row[7]}
+
+    def external_import_state(self, user_id, provider):
+        user_id = self._positive_id(user_id, "user_id")
+        row = self.db.execute("""
+            SELECT statuses, state, requested_at, started_at, finished_at, next_run_at,
+                   imported_count, last_error
+            FROM external_import_state WHERE user_id=? AND provider=?
+        """, (user_id, str(provider))).fetchone()
+        return self._external_import_state(row)
+
+    def queue_external_import(self, user_id, provider, statuses, *, now=None):
+        """Durably request an owner-bound background import; no credentials enter it."""
+        user_id, provider = self._positive_id(user_id, "user_id"), str(provider).strip()
+        values = sorted({str(value).strip() for value in statuses if str(value).strip()})
+        if not provider or not values:
+            raise ValueError("External import requires a provider and statuses")
+        moment = self._now(now)
+        encoded = json.dumps(values, separators=(",", ":"))
+        with self.db:
+            self.db.execute("""
+                INSERT INTO external_import_state(
+                    user_id, provider, statuses, state, requested_at, started_at, finished_at,
+                    next_run_at, imported_count, last_error
+                ) VALUES (?, ?, ?, 'queued', ?, NULL, NULL, ?, 0, NULL)
+                ON CONFLICT(user_id, provider) DO UPDATE SET
+                    statuses=excluded.statuses, state='queued', requested_at=excluded.requested_at,
+                    started_at=NULL, finished_at=NULL, next_run_at=excluded.next_run_at,
+                    last_error=NULL
+            """, (user_id, provider, encoded, moment, moment))
+        return self.external_import_state(user_id, provider)
+
+    def start_external_import(self, user_id, provider, *, now=None):
+        user_id = self._positive_id(user_id, "user_id")
+        moment = self._now(now)
+        with self.db:
+            cursor = self.db.execute("""
+                UPDATE external_import_state
+                SET state='running', started_at=?, last_error=NULL
+                WHERE user_id=? AND provider=?
+            """, (moment, user_id, str(provider)))
+        return self.external_import_state(user_id, provider) if cursor.rowcount else None
+
+    def finish_external_import(self, user_id, provider, imported_count, *, next_run_at, now=None):
+        user_id = self._positive_id(user_id, "user_id")
+        moment = self._now(now)
+        with self.db:
+            cursor = self.db.execute("""
+                UPDATE external_import_state
+                SET state='ready', finished_at=?, next_run_at=?, imported_count=?, last_error=NULL
+                WHERE user_id=? AND provider=?
+            """, (moment, float(next_run_at), max(0, int(imported_count)), user_id, str(provider)))
+        return self.external_import_state(user_id, provider) if cursor.rowcount else None
+
+    def fail_external_import(self, user_id, provider, error, *, retry_at, now=None):
+        user_id = self._positive_id(user_id, "user_id")
+        moment = self._now(now)
+        safe_error = str(error or "temporary_error")[:120]
+        with self.db:
+            cursor = self.db.execute("""
+                UPDATE external_import_state
+                SET state='failed', finished_at=?, next_run_at=?, last_error=?
+                WHERE user_id=? AND provider=?
+            """, (moment, float(retry_at), safe_error, user_id, str(provider)))
+        return self.external_import_state(user_id, provider) if cursor.rowcount else None
+
+    def due_external_imports(self, provider, *, now=None, limit=100):
+        """Return non-secret import requests whose next attempt is due."""
+        moment = self._now(now)
+        limit = max(1, min(500, int(limit)))
+        rows = self.db.execute("""
+            SELECT user_id, statuses, state, requested_at, started_at, finished_at, next_run_at,
+                   imported_count, last_error
+            FROM external_import_state
+            WHERE provider=? AND state<>'running' AND next_run_at<=?
+            ORDER BY next_run_at ASC LIMIT ?
+        """, (str(provider), moment, limit)).fetchall()
+        result = []
+        for row in rows:
+            state = self._external_import_state(row[1:])
+            if state:
+                result.append({"user_id": int(row[0]), **state})
+        return result
+
+    def forget_external_import_state(self, user_id, provider):
+        with self.db:
+            self.db.execute("DELETE FROM external_import_state WHERE user_id=? AND provider=?",
                             (self._positive_id(user_id, "user_id"), str(provider)))
 
     def create_oauth_state(self, user_id, provider, state, ttl=600, now=None):

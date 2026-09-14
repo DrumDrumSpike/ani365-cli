@@ -25,6 +25,7 @@ class Config:
     shikimori_client_id: str = ""
     shikimori_client_secret: str = ""
     shikimori_redirect_uri: str = ""
+    shikimori_import_interval: int = 12 * 60 * 60
 
     @classmethod
     def from_env(cls):
@@ -85,7 +86,14 @@ class Config:
             if (parsed_redirect.scheme != "https" or not parsed_redirect.hostname
                     or parsed_redirect.username or parsed_redirect.query or parsed_redirect.fragment):
                 raise ConfigError("SHIKIMORI_REDIRECT_URI must be an HTTPS URL without query")
+        try:
+            shikimori_import_interval = int(os.environ.get("SHIKIMORI_IMPORT_INTERVAL", str(12 * 60 * 60)))
+        except ValueError:
+            raise ConfigError("SHIKIMORI_IMPORT_INTERVAL must be a positive number of seconds") from None
+        if shikimori_import_interval < 15 * 60:
+            raise ConfigError("SHIKIMORI_IMPORT_INTERVAL must be at least 900 seconds")
         return cls(token.strip(), int(owner), Path(os.environ.get("DATA_DIR", "data")), url,
                    telegram_url, Path(os.environ.get("MEDIA_DIR", "/jobs")), watch_check_interval,
                    mini_app_url, cookie_secure in ("1", "true", "yes"), completion_threshold,
-                   download_workers, download_ttl, shikimori_id, shikimori_secret, shikimori_redirect)
+                   download_workers, download_ttl, shikimori_id, shikimori_secret, shikimori_redirect,
+                   shikimori_import_interval)

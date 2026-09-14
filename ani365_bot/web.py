@@ -39,6 +39,9 @@ TRAVEL_BATCH_LIMIT = 25
 SHIKIMORI_AUTO_LINK_BATCH = 50
 SHIKIMORI_IMPORT_PAGE_SIZE = 50
 SHIKIMORI_IMPORT_FOREGROUND_METADATA_BATCH = 50
+SHIKIMORI_BACKGROUND_STATUSES = ("watching", "planned")
+SHIKIMORI_BACKGROUND_RETRY_SECONDS = 15 * 60
+SHIKIMORI_BACKGROUND_POLL_SECONDS = 60
 
 
 class WebAuthError(ValueError):
@@ -380,6 +383,9 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
                                     config.shikimori_redirect_uri)
     app.state.shikimori_metadata_refresh_after = {}
     app.state.shikimori_import_tasks = {}
+    app.state.shikimori_background_import_tasks = {}
+    app.state.shikimori_background_semaphore = asyncio.Semaphore(1)
+    app.state.shikimori_scheduler_task = None
 
     async def authenticated_user(request: Request,
                                  init_data: str | None = Header(default=None,
@@ -579,6 +585,82 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
                     poster_url=metadata["poster_url"], kind=metadata["shikimori_kind"],
                     aired_on=metadata["shikimori_aired_on"])
 
+    async def restore_linked_shikimori_rates(user_id, rates):
+        """Restore confirmed links after an import without changing list status."""
+        imported_ids = {item["external_rate_id"] for item in rates}
+        linked = []
+        for rate in store.external_user_rates(user_id, "shikimori", linked=True):
+            if rate["external_rate_id"] not in imported_ids:
+                continue
+            series_id = rate["anime365_series_id"]
+            store.add_watchlist(user_id, series_id, rate["title"])
+            await merge_shikimori_progress(user_id, series_id, rate)
+            linked.append(rate)
+        return linked
+
+    async def run_shikimori_background_import(user_id):
+        """Refresh a saved list slowly in the background, with durable retries."""
+        state = store.start_external_import(user_id, "shikimori")
+        if not state:
+            return
+        statuses = set(state["statuses"])
+        try:
+            async with app.state.shikimori_background_semaphore:
+                account = await shikimori_account(user_id)
+                upstream = await app.state.shikimori.user_rates(
+                    account["access_token"], account["external_user_id"])
+                external_ids = []
+                for row in upstream:
+                    target = row.get("target") if isinstance(row.get("target"), dict) else {}
+                    external_ids.append(str(row.get("target_id") or target.get("id") or ""))
+                cached = store.external_anime_metadata_many("shikimori", external_ids)
+                initial = _shikimori_rates(upstream, statuses, metadata_by_id=cached)
+                # First persist rate IDs and any cached labels. A restart or a
+                # temporary metadata throttle never makes the user re-import.
+                persist_shikimori_rates(user_id, initial)
+                await restore_linked_shikimori_rates(user_id, initial)
+                hydrated = await _shikimori_rates_with_titles(
+                    app.state.shikimori, store, upstream, statuses)
+                persist_shikimori_rates(user_id, hydrated)
+                await restore_linked_shikimori_rates(user_id, hydrated)
+        except asyncio.CancelledError:
+            store.fail_external_import(user_id, "shikimori", "cancelled",
+                                       retry_at=time.time())
+            raise
+        except (ShikimoriError, HTTPException, ValueError):
+            store.fail_external_import(user_id, "shikimori", "shikimori_unavailable",
+                                       retry_at=time.time() + SHIKIMORI_BACKGROUND_RETRY_SECONDS)
+            LOG.info("Shikimori background import deferred (user=%s)", user_id)
+        except Exception:
+            store.fail_external_import(user_id, "shikimori", "unexpected_error",
+                                       retry_at=time.time() + SHIKIMORI_BACKGROUND_RETRY_SECONDS)
+            LOG.exception("Shikimori background import failed (user=%s)", user_id)
+        else:
+            store.finish_external_import(user_id, "shikimori", len(hydrated),
+                                         next_run_at=time.time() + config.shikimori_import_interval)
+
+    def schedule_shikimori_background_import(user_id):
+        current = app.state.shikimori_background_import_tasks.get(user_id)
+        if current and not current.done():
+            return current
+        task = asyncio.create_task(run_shikimori_background_import(user_id))
+        app.state.shikimori_background_import_tasks[user_id] = task
+        task.add_done_callback(lambda _: app.state.shikimori_background_import_tasks.pop(user_id, None))
+        return task
+
+    async def shikimori_background_scheduler():
+        """Resume due imports after deploy/restart and refresh them periodically."""
+        while True:
+            try:
+                for user_id in store.external_account_user_ids("shikimori"):
+                    if store.external_import_state(user_id, "shikimori") is None:
+                        store.queue_external_import(user_id, "shikimori", SHIKIMORI_BACKGROUND_STATUSES)
+                for item in store.due_external_imports("shikimori"):
+                    schedule_shikimori_background_import(item["user_id"])
+            except Exception:
+                LOG.exception("Shikimori background scheduler failed")
+            await asyncio.sleep(SHIKIMORI_BACKGROUND_POLL_SECONDS)
+
     def schedule_shikimori_metadata_import(user_id, upstream, statuses):
         """Finish a large public title hydration after the responsive import reply."""
         current = app.state.shikimori_import_tasks.get(user_id)
@@ -601,10 +683,18 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
 
     @app.on_event("shutdown")
     async def shutdown():
+        scheduler = app.state.shikimori_scheduler_task
+        if scheduler:
+            scheduler.cancel()
+            await asyncio.gather(scheduler, return_exceptions=True)
         for task in app.state.shikimori_import_tasks.values():
             task.cancel()
         if app.state.shikimori_import_tasks:
             await asyncio.gather(*app.state.shikimori_import_tasks.values(), return_exceptions=True)
+        for task in app.state.shikimori_background_import_tasks.values():
+            task.cancel()
+        if app.state.shikimori_background_import_tasks:
+            await asyncio.gather(*app.state.shikimori_background_import_tasks.values(), return_exceptions=True)
         await app.state.downloads.stop()
         if owns_store:
             store.close()
@@ -612,6 +702,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     @app.on_event("startup")
     async def startup():
         await app.state.downloads.start()
+        app.state.shikimori_scheduler_task = asyncio.create_task(shikimori_background_scheduler())
 
     @app.get("/health")
     async def health():
@@ -638,7 +729,8 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     @app.get("/api/shikimori/status")
     async def shikimori_status(user_id=Depends(authenticated_user)):
         return {"configured": app.state.shikimori.configured,
-                **store.external_account_status(user_id, "shikimori")}
+                **store.external_account_status(user_id, "shikimori"),
+                "background_import": store.external_import_state(user_id, "shikimori")}
 
     @app.patch("/api/shikimori/settings")
     async def shikimori_settings(payload: ShikimoriSettingsRequest,
@@ -669,12 +761,31 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
                                         app.state.shikimori.expires_at(token), str(profile["id"]))
         except ShikimoriError:
             return HTMLResponse("<h1>Shikimori временно недоступен. Попробуйте ещё раз.</h1>", status_code=502)
-        return HTMLResponse("<h1>Shikimori подключён.</h1><p>Вернитесь в Telegram Mini App.</p>")
+        store.queue_external_import(user_id, "shikimori", SHIKIMORI_BACKGROUND_STATUSES)
+        schedule_shikimori_background_import(user_id)
+        return HTMLResponse("<h1>Shikimori подключён.</h1><p>Список импортируется в фоне. Вернитесь в Telegram Mini App.</p>")
 
     @app.delete("/api/shikimori")
     async def shikimori_disconnect(user_id=Depends(authenticated_user)):
+        task = app.state.shikimori_background_import_tasks.get(user_id)
+        if task and not task.done():
+            task.cancel()
         store.forget_external_account(user_id, "shikimori")
+        store.forget_external_import_state(user_id, "shikimori")
         return Response(status_code=204)
+
+    @app.post("/api/shikimori/import/background", status_code=202)
+    async def shikimori_background_import(payload: ShikimoriImportRequest,
+                                          user_id=Depends(authenticated_user)):
+        """Queue a durable import and return immediately to the Mini App."""
+        selected = set(payload.statuses)
+        if not selected or not selected <= SHIKIMORI_STATUSES:
+            raise HTTPException(422, "Некорректный статус Shikimori.")
+        if not store.external_account(user_id, "shikimori"):
+            raise HTTPException(409, "Сначала подключите Shikimori.")
+        state = store.queue_external_import(user_id, "shikimori", selected)
+        schedule_shikimori_background_import(user_id)
+        return {"background_import": state}
 
     @app.get("/api/shikimori/import/preview")
     async def shikimori_import_preview(statuses: list[str] = Query(default=["watching", "planned"]),
@@ -702,31 +813,37 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         selected = set(payload.statuses)
         if not selected or not selected <= SHIKIMORI_STATUSES:
             raise HTTPException(422, "Некорректный статус Shikimori.")
-        account = await shikimori_account(user_id)
+        task = app.state.shikimori_background_import_tasks.get(user_id)
+        if task and not task.done():
+            raise HTTPException(409, "Фоновый импорт уже выполняется. Дождитесь его завершения.")
+        store.queue_external_import(user_id, "shikimori", selected)
+        store.start_external_import(user_id, "shikimori")
         try:
+            account = await shikimori_account(user_id)
             upstream = await app.state.shikimori.user_rates(account["access_token"], account["external_user_id"])
         except ShikimoriError as exc:
+            store.fail_external_import(user_id, "shikimori", "shikimori_unavailable",
+                                       retry_at=time.time() + SHIKIMORI_BACKGROUND_RETRY_SECONDS)
             raise HTTPException(502, str(exc)) from None
+        except HTTPException:
+            store.fail_external_import(user_id, "shikimori", "account_unavailable",
+                                       retry_at=time.time() + SHIKIMORI_BACKGROUND_RETRY_SECONDS)
+            raise
         try:
             rates = await _shikimori_rates_with_titles(
                 app.state.shikimori, store, upstream, selected,
                 max_missing=SHIKIMORI_IMPORT_FOREGROUND_METADATA_BATCH)
         except ShikimoriError as exc:
+            store.fail_external_import(user_id, "shikimori", "shikimori_unavailable",
+                                       retry_at=time.time() + SHIKIMORI_BACKGROUND_RETRY_SECONDS)
             raise HTTPException(502, str(exc)) from None
         persist_shikimori_rates(user_id, rates)
         metadata_refreshing = any(rate["title"].startswith("Shikimori #") for rate in rates)
         if metadata_refreshing:
             schedule_shikimori_metadata_import(user_id, upstream, selected)
-        linked = []
-        for rate in store.external_user_rates(user_id, "shikimori", linked=True):
-            # A previous explicit mapping or an exact provider-ID mapping can
-            # safely restore this title to the local playback library.
-            if rate["external_rate_id"] not in {item["external_rate_id"] for item in rates}:
-                continue
-            series_id = rate["anime365_series_id"]
-            store.add_watchlist(user_id, series_id, rate["title"])
-            await merge_shikimori_progress(user_id, series_id, rate)
-            linked.append(rate)
+        linked = await restore_linked_shikimori_rates(user_id, rates)
+        store.finish_external_import(user_id, "shikimori", len(rates),
+                                     next_run_at=time.time() + config.shikimori_import_interval)
         unmatched_total = store.external_user_rate_count(user_id, "shikimori", linked=False)
         unmatched = store.external_user_rates(user_id, "shikimori", linked=False,
                                                limit=SHIKIMORI_IMPORT_PAGE_SIZE)

@@ -169,6 +169,21 @@ class StoreTests(unittest.TestCase):
         self.assertIsNone(self.store.consume_oauth_state("shikimori", "state-which-is-not-a-token", now=2))
         self.assertNotIn(b"access-secret", (self.directory / "bot.sqlite3").read_bytes())
 
+    def test_background_external_import_state_is_private_and_survives_restart(self):
+        queued = self.store.queue_external_import(1, "shikimori", ["watching", "planned"], now=10)
+        self.assertEqual(queued["state"], "queued")
+        self.assertEqual(queued["statuses"], ["planned", "watching"])
+        self.assertEqual([item["user_id"] for item in self.store.due_external_imports("shikimori", now=10)], [1])
+        self.assertIsNone(self.store.external_import_state(2, "shikimori"))
+        self.assertEqual(self.store.start_external_import(1, "shikimori", now=11)["state"], "running")
+        self.assertEqual(self.store.finish_external_import(1, "shikimori", 12, next_run_at=100, now=12)
+                         ["imported_count"], 12)
+        self.assertEqual(self.store.due_external_imports("shikimori", now=99), [])
+        self.reopen()
+        self.assertEqual(self.store.external_import_state(1, "shikimori")["state"], "ready")
+        self.store.fail_external_import(1, "shikimori", "safe_error", retry_at=110, now=100)
+        self.assertEqual(self.store.external_import_state(1, "shikimori")["last_error"], "safe_error")
+
     def test_external_import_and_mapping_are_private_and_do_not_lower_local_progress(self):
         self.store.save_external_id(10, "shikimori", "501")
         self.store.import_external_rates(1, "shikimori", [{
