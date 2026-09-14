@@ -40,6 +40,7 @@ TICKET_TTL = 5 * 60
 HLS_TICKET_TTL = 60 * 60
 HLS_PLAYLIST_MAX_BYTES = 2 * 1024 * 1024
 HLS_PLAYLIST_MAX_URIS = 3000
+MAX_POSTER_BYTES = 5 * 1024 * 1024
 TRAVEL_BATCH_LIMIT = 25
 SHIKIMORI_AUTO_LINK_BATCH = 50
 SHIKIMORI_IMPORT_PAGE_SIZE = 50
@@ -455,6 +456,7 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
     app.state.hentai = hentai
     app.state.tickets = EphemeralTickets()
     app.state.subtitle_tickets = EphemeralTickets()
+    app.state.poster_tickets = EphemeralTickets()
     app.state.limiter = RateLimiter()
     app.state.sessions = SessionSigner(config.bot_token)
     app.state.config = config
@@ -484,15 +486,23 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
                 "upstream_series_id": int(item["series_id"]) - HENTAI_SERIES_OFFSET
                 if provider == "hentai365" else int(item["series_id"])}
 
-    def hentai_poster(row):
-        value = row.get("posterUrlSmall") or row.get("posterUrl")
+    def is_hentai_poster_url(value):
         parts = urlsplit(value) if isinstance(value, str) else None
-        hosts = {urlsplit(config.hentai_url).hostname, "hentai365.ru", "h365-art.org"}
+        hosts = {host for host in (urlsplit(config.hentai_url).hostname, "hentai365.ru", "h365-art.org") if host}
         if not parts or parts.scheme != "https" or parts.hostname not in hosts \
                 or parts.username or parts.password or parts.query or parts.fragment \
                 or not parts.path.startswith("/posters/"):
+            return False
+        return True
+
+    def hentai_poster(row):
+        value = row.get("posterUrlSmall") or row.get("posterUrl")
+        return value if is_hentai_poster_url(value) else None
+
+    def poster_proxy_url(user_id, value):
+        if not is_hentai_poster_url(value):
             return None
-        return value
+        return "/api/posters/" + app.state.poster_tickets.create(user_id, value)
 
     def require_shikimori_series(series_id):
         if is_hentai_series(series_id):
@@ -1127,6 +1137,8 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
                  if is_hentai_series(item["series_id"])
                  else metadata.get(item["series_id"], {}))} for item in watched]
         hentai_items = [item for item in all_items if item["provider"] == "hentai365"]
+        for item in hentai_items:
+            item["poster_url"] = poster_proxy_url(user_id, item.get("poster_url"))
         items = [item for item in all_items if item["provider"] == "anime365"]
         # A local title without Shikimori status remains "watching", preserving
         # the old bot workflow. Once a status exists, Shikimori is the source
@@ -1332,7 +1344,7 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
             items.append({
                 "series_id": public_series_id("hentai365", row["id"]), "title": title(row),
                 "year": row.get("year"), "series_type": row.get("typeTitle") or row.get("type"),
-                "poster_url": poster_url, "provider": "hentai365",
+                "poster_url": poster_proxy_url(user_id, poster_url), "provider": "hentai365",
             })
         return {"items": items}
 
@@ -1346,6 +1358,8 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
                     "hentai365", int(series_id) - HENTAI_SERIES_OFFSET) or {}).get("poster_url")}
                 if is_hentai_series(series_id)
                 else store.shikimori_library_metadata(user_id).get(series_id, {}))}
+        if is_hentai_series(series_id):
+            item["poster_url"] = poster_proxy_url(user_id, item.get("poster_url"))
         try:
             source, _token, upstream_series_id, _provider = source_for_series(series_id)
             episodes = await source.episodes(upstream_series_id)
@@ -1574,6 +1588,51 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
         if not path.is_file():
             raise HTTPException(410, "Файл больше недоступен.")
         return FileResponse(path, filename=path.name, media_type="video/x-matroska")
+
+    @app.get("/api/posters/{ticket}")
+    async def poster(ticket: str, user_id=Depends(authenticated_user)):
+        """Serve a small Hentai365 cover from the Mini App origin.
+
+        The ticket is short-lived, bound to its Telegram owner and created only
+        from a validated ``/posters/`` URL.  This avoids both arbitrary fetches
+        and WebView/RKN failures for cross-origin cover requests.
+        """
+        item = app.state.poster_tickets.get(ticket, user_id)
+        if item is None or not is_hentai_poster_url(item.url):
+            raise HTTPException(404, "Обложка больше недоступна.")
+        client = httpx.AsyncClient(transport=app.state.proxy_transport, follow_redirects=False,
+                                   timeout=httpx.Timeout(15, read=30))
+        try:
+            upstream = await client.send(client.build_request(
+                "GET", item.url, headers={"Accept": "image/avif,image/webp,image/*"}), stream=True)
+        except httpx.HTTPError:
+            await client.aclose()
+            raise HTTPException(502, "Не удалось получить обложку.") from None
+        content_type = upstream.headers.get("content-type", "").split(";", 1)[0].strip().casefold()
+        try:
+            content_length = int(upstream.headers.get("content-length", "0") or 0)
+        except ValueError:
+            content_length = 0
+        if upstream.status_code != 200 or not content_type.startswith("image/") \
+                or content_length > MAX_POSTER_BYTES:
+            await upstream.aclose()
+            await client.aclose()
+            raise HTTPException(502, "Не удалось получить обложку.")
+
+        async def body():
+            received = 0
+            try:
+                async for chunk in upstream.aiter_bytes(64 * 1024):
+                    received += len(chunk)
+                    if received > MAX_POSTER_BYTES:
+                        break
+                    yield chunk
+            finally:
+                await upstream.aclose()
+                await client.aclose()
+
+        return StreamingResponse(body(), media_type=content_type,
+                                 headers={"Cache-Control": "private, max-age=300"})
 
     @app.get("/api/stream/{ticket}")
     async def stream(ticket: str, request: Request, user_id=Depends(authenticated_user)):

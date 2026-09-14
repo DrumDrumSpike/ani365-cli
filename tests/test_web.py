@@ -109,14 +109,22 @@ class WebTests(unittest.TestCase):
         hentai.media_source = AsyncMock(return_value=MediaSource(
             ("https://cdn.example/hentai.m3u8?signature=private",), None))
         config = replace(self.config, hentai_url="https://hentai365.ru/api", hentai_token="hentai-secret")
-        app = create_app(config, self.store, self.anime, hentai)
+        transport = httpx.MockTransport(lambda _request: httpx.Response(
+            200, headers={"content-type": "image/webp", "content-length": "4"}, content=b"cover"))
+        app = create_app(config, self.store, self.anime, hentai, proxy_transport=transport)
         client = TestClient(app)
         try:
             catalog = client.get("/api/hentai/catalog?query=test", headers=self.headers(42))
             self.assertEqual(catalog.status_code, 200)
             item = catalog.json()["items"][0]
             self.assertEqual(item["series_id"], 1_000_000_000_055)
-            self.assertEqual(item["poster_url"], "https://h365-art.org/posters/55.jpg")
+            self.assertTrue(item["poster_url"].startswith("/api/posters/"))
+            cover = client.get(item["poster_url"], headers=self.headers(42))
+            self.assertEqual(cover.status_code, 200)
+            self.assertEqual(cover.headers["content-type"], "image/webp")
+            self.assertEqual(cover.content, b"cover")
+            self.store.add_allowed_user(7, owner_id=42)
+            self.assertEqual(client.get(item["poster_url"], headers=self.headers(7)).status_code, 404)
             self.assertNotIn("hentai-secret", catalog.text)
             added = client.post("/api/library", headers=self.headers(42), json={
                 "series_id": item["series_id"], "title": item["title"], "provider": "hentai365",
@@ -125,12 +133,11 @@ class WebTests(unittest.TestCase):
             detail = client.get(f"/api/library/{item['series_id']}", headers=self.headers(42))
             self.assertEqual(detail.status_code, 200)
             self.assertEqual(detail.json()["item"]["provider"], "hentai365")
-            self.assertEqual(detail.json()["item"]["poster_url"], "https://h365-art.org/posters/55.jpg")
+            self.assertTrue(detail.json()["item"]["poster_url"].startswith("/api/posters/"))
             library = client.get("/api/library", headers=self.headers(42))
             self.assertEqual(library.json()["items"], [])
             self.assertEqual(library.json()["continue"], [])
-            self.assertEqual(library.json()["hentai_items"][0]["poster_url"],
-                             "https://h365-art.org/posters/55.jpg")
+            self.assertTrue(library.json()["hentai_items"][0]["poster_url"].startswith("/api/posters/"))
             hentai.episodes.assert_awaited_with(55)
             play = client.post("/api/play", headers=self.headers(42), json={
                 "series_id": item["series_id"], "episode_id": 1700, "translation_id": 1800, "quality": 720,
