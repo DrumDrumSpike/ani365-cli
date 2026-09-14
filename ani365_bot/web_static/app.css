@@ -7,6 +7,8 @@ h1, h2 { margin: 18px 0 10px; } h1 { font-size: 24px; } h2 { font-size: 19px; }
 .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
 .card, .panel { background: var(--tg-theme-secondary-bg-color, #243241); border-radius: 14px; padding: 13px; }
 .download-group { margin: 18px 0; }.download-group h2 { margin-bottom: 8px; }.download-group .panel { margin: 8px 0; }
+.library-group { margin: 12px 0; background: var(--tg-theme-secondary-bg-color, #243241); border-radius: 14px; padding: 0 13px 13px; }
+.library-group summary { cursor: pointer; font-size: 19px; font-weight: 700; padding: 13px 0; }.library-group .grid { padding-top: 2px; }
 .card button { width: 100%; text-align: left; background: transparent; color: inherit; border: 0; font: inherit; padding: 0; }
 .poster { width: 100%; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 9px; display: block; margin-bottom: 9px; background: #111; }
 .title-header { display: flex; align-items: flex-start; gap: 12px; margin: 18px 0 10px; }
