@@ -612,7 +612,7 @@ class Store:
                 imported.append(rate_id)
         return imported
 
-    def external_user_rates(self, user_id, provider, *, linked=None, limit=2000):
+    def external_user_rates(self, user_id, provider, *, linked=None, limit=2000, offset=0):
         user_id = self._positive_id(user_id, "user_id")
         where, params = ["user_id=?", "provider=?"], [user_id, str(provider)]
         if linked is True:
@@ -620,13 +620,26 @@ class Store:
         elif linked is False:
             where.append("anime365_series_id IS NULL")
         limit = max(1, min(5000, int(limit)))
+        offset = max(0, int(offset))
         rows = self.db.execute(f"""
             SELECT external_rate_id, external_anime_id, status, episodes, title,
                    anime365_series_id, imported_at
             FROM external_user_rates WHERE {' AND '.join(where)}
-            ORDER BY imported_at DESC, title COLLATE NOCASE LIMIT ?
-        """, [*params, limit]).fetchall()
+            ORDER BY imported_at DESC, title COLLATE NOCASE LIMIT ? OFFSET ?
+        """, [*params, limit, offset]).fetchall()
         return [self._external_rate(row) for row in rows]
+
+    def external_user_rate_count(self, user_id, provider, *, linked=None):
+        user_id = self._positive_id(user_id, "user_id")
+        where, params = ["user_id=?", "provider=?"], [user_id, str(provider)]
+        if linked is True:
+            where.append("anime365_series_id IS NOT NULL")
+        elif linked is False:
+            where.append("anime365_series_id IS NULL")
+        row = self.db.execute(f"""
+            SELECT COUNT(*) FROM external_user_rates WHERE {' AND '.join(where)}
+        """, params).fetchone()
+        return int(row[0])
 
     def external_user_rate(self, user_id, provider, rate_id):
         user_id = self._positive_id(user_id, "user_id")

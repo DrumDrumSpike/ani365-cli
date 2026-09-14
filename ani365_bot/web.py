@@ -37,6 +37,7 @@ SESSION_MAX_AGE = 6 * 60 * 60
 TICKET_TTL = 5 * 60
 TRAVEL_BATCH_LIMIT = 25
 SHIKIMORI_AUTO_LINK_BATCH = 50
+SHIKIMORI_IMPORT_PAGE_SIZE = 50
 
 
 class WebAuthError(ValueError):
@@ -543,13 +544,23 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
             store.add_watchlist(user_id, series_id, rate["title"])
             await merge_shikimori_progress(user_id, series_id, rate)
             linked.append(rate)
-        unmatched = store.external_user_rates(user_id, "shikimori", linked=False)
+        unmatched_total = store.external_user_rate_count(user_id, "shikimori", linked=False)
+        unmatched = store.external_user_rates(user_id, "shikimori", linked=False,
+                                               limit=SHIKIMORI_IMPORT_PAGE_SIZE)
         return {"imported": len(rates), "linked": len(linked), "unmatched": unmatched,
+                "unmatched_total": unmatched_total,
+                "next_offset": len(unmatched) if len(unmatched) < unmatched_total else None,
                 "policy": "progress=max(local, shikimori); Shikimori status is primary"}
 
     @app.get("/api/shikimori/imports")
-    async def shikimori_imports(linked: bool | None = None, user_id=Depends(authenticated_user)):
-        return {"items": store.external_user_rates(user_id, "shikimori", linked=linked),
+    async def shikimori_imports(linked: bool | None = None, offset: int = Query(default=0, ge=0),
+                                limit: int = Query(default=SHIKIMORI_IMPORT_PAGE_SIZE, ge=1, le=100),
+                                user_id=Depends(authenticated_user)):
+        total = store.external_user_rate_count(user_id, "shikimori", linked=linked)
+        items = store.external_user_rates(user_id, "shikimori", linked=linked, offset=offset, limit=limit)
+        next_offset = offset + len(items)
+        return {"items": items, "total": total,
+                "next_offset": next_offset if next_offset < total else None,
                 "policy": "progress=max(local, shikimori); Shikimori status is primary"}
 
     @app.post("/api/shikimori/imports/auto-link")
@@ -584,7 +595,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
             if bound:
                 await merge_shikimori_progress(user_id, series_id, bound)
                 linked += 1
-        remaining = len(store.external_user_rates(user_id, "shikimori", linked=False))
+        remaining = store.external_user_rate_count(user_id, "shikimori", linked=False)
         return {"checked": len(rates), "linked": linked, "remaining": remaining,
                 "batch_limited": remaining > 0 and len(rates) == SHIKIMORI_AUTO_LINK_BATCH}
 
