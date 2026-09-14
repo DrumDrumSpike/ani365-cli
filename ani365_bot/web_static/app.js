@@ -38,7 +38,7 @@
     try {
       telegram?.BackButton.hide();
       const data = await api('/api/library'); state.library = data.items;
-      root.innerHTML = `<h1>Anime365</h1><button class="action" id="search">Найти аниме</button><button class="action secondary" id="downloads">Загрузки</button><button class="action secondary" id="settings">Настройки</button><h2>Продолжить просмотр</h2>${cards(data.continue, true)}<h2>Смотрю</h2>${cards(data.items)}`;
+      root.innerHTML = `<h1>Anime365</h1><button class="action" id="search">Найти аниме</button><button class="action secondary" id="downloads">Загрузки</button><button class="action secondary" id="settings">Настройки</button><h2>Продолжить просмотр</h2>${cards(data.continue, true)}${data.new_episodes?.length ? `<h2>Новые серии</h2>${cards(data.new_episodes)}` : ''}<h2>Смотрю</h2>${cards(data.items)}`;
       document.getElementById('search').onclick = search;
       document.getElementById('downloads').onclick = downloads;
       document.getElementById('settings').onclick = settings;

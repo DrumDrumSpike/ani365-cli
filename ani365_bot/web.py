@@ -659,7 +659,11 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
                  for item in store.list_watchlist(user_id)]
         recent = [{**item, **metadata.get(item["series_id"], {})}
                   for item in store.recent_playback(user_id)]
-        return {"items": items, "continue": recent}
+        new_episodes = [item for item in items
+                        if item.get("last_watched_episode_number") is not None
+                        and number(item.get("last_available_episode_number"))
+                        > number(item.get("last_watched_episode_number"))]
+        return {"items": items, "continue": recent, "new_episodes": new_episodes}
 
     @app.post("/api/library")
     async def add_library(payload: AddLibraryRequest, user_id=Depends(authenticated_user)):
