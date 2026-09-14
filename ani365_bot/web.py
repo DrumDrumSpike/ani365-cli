@@ -38,6 +38,7 @@ TICKET_TTL = 5 * 60
 TRAVEL_BATCH_LIMIT = 25
 SHIKIMORI_AUTO_LINK_BATCH = 50
 SHIKIMORI_IMPORT_PAGE_SIZE = 50
+SHIKIMORI_IMPORT_FOREGROUND_METADATA_BATCH = 50
 
 
 class WebAuthError(ValueError):
@@ -323,7 +324,7 @@ def _shikimori_rates(rows, statuses, anime_by_id=None, metadata_by_id=None):
     return result
 
 
-async def _shikimori_rates_with_titles(shikimori_client, store, rows, statuses):
+async def _shikimori_rates_with_titles(shikimori_client, store, rows, statuses, *, max_missing=None):
     """Use shared cached metadata before requesting a batch from Shikimori."""
     external_ids = []
     for row in rows:
@@ -335,6 +336,8 @@ async def _shikimori_rates_with_titles(shikimori_client, store, rows, statuses):
     preliminary = _shikimori_rates(rows, statuses, metadata_by_id=cached)
     missing = [item["external_anime_id"] for item in preliminary
                if item["title"].startswith("Shikimori #")]
+    if max_missing is not None:
+        missing = missing[:max(0, int(max_missing))]
     if not missing:
         return preliminary
     details = await shikimori_client.animes(missing)
@@ -376,6 +379,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     app.state.shikimori = Shikimori(config.shikimori_client_id, config.shikimori_client_secret,
                                     config.shikimori_redirect_uri)
     app.state.shikimori_metadata_refresh_after = {}
+    app.state.shikimori_import_tasks = {}
 
     async def authenticated_user(request: Request,
                                  init_data: str | None = Header(default=None,
@@ -528,8 +532,44 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         except (ShikimoriError, HTTPException, ValueError):
             LOG.warning("Shikimori progress sync failed (user=%s series=%s)", user_id, series_id)
 
+    def persist_shikimori_rates(user_id, rates):
+        """Store private rates and shared public metadata without credentials."""
+        store.import_external_rates(user_id, "shikimori", rates)
+        for rate in rates:
+            metadata = {key: rate.get(key) for key in
+                        ("poster_url", "shikimori_kind", "shikimori_aired_on")}
+            if any(metadata.values()) or not rate["title"].startswith("Shikimori #"):
+                store.save_external_anime_metadata(
+                    "shikimori", rate["external_anime_id"], title=rate["title"],
+                    poster_url=metadata["poster_url"], kind=metadata["shikimori_kind"],
+                    aired_on=metadata["shikimori_aired_on"])
+
+    def schedule_shikimori_metadata_import(user_id, upstream, statuses):
+        """Finish a large public title hydration after the responsive import reply."""
+        current = app.state.shikimori_import_tasks.get(user_id)
+        if current and not current.done():
+            return
+
+        async def worker():
+            try:
+                rates = await _shikimori_rates_with_titles(
+                    app.state.shikimori, store, upstream, statuses)
+                persist_shikimori_rates(user_id, rates)
+            except (ShikimoriError, ValueError):
+                LOG.info("Shikimori title hydration deferred (user=%s)", user_id)
+            except Exception:
+                LOG.exception("Shikimori title hydration failed (user=%s)", user_id)
+
+        task = asyncio.create_task(worker())
+        app.state.shikimori_import_tasks[user_id] = task
+        task.add_done_callback(lambda _: app.state.shikimori_import_tasks.pop(user_id, None))
+
     @app.on_event("shutdown")
     async def shutdown():
+        for task in app.state.shikimori_import_tasks.values():
+            task.cancel()
+        if app.state.shikimori_import_tasks:
+            await asyncio.gather(*app.state.shikimori_import_tasks.values(), return_exceptions=True)
         await app.state.downloads.stop()
         if owns_store:
             store.close()
@@ -613,10 +653,14 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         except ShikimoriError as exc:
             raise HTTPException(502, str(exc)) from None
         try:
-            items = await _shikimori_rates_with_titles(app.state.shikimori, store, rates, selected)
+            items = await _shikimori_rates_with_titles(
+                app.state.shikimori, store, rates, selected,
+                max_missing=SHIKIMORI_IMPORT_FOREGROUND_METADATA_BATCH)
         except ShikimoriError as exc:
             raise HTTPException(502, str(exc)) from None
-        return {"items": items, "count": len(items), "policy": "progress=max(local, shikimori)"}
+        return {"items": items, "count": len(items),
+                "metadata_refreshing": any(item["title"].startswith("Shikimori #") for item in items),
+                "policy": "progress=max(local, shikimori)"}
 
     @app.post("/api/shikimori/import")
     async def shikimori_import(payload: ShikimoriImportRequest, user_id=Depends(authenticated_user)):
@@ -629,18 +673,15 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         except ShikimoriError as exc:
             raise HTTPException(502, str(exc)) from None
         try:
-            rates = await _shikimori_rates_with_titles(app.state.shikimori, store, upstream, selected)
+            rates = await _shikimori_rates_with_titles(
+                app.state.shikimori, store, upstream, selected,
+                max_missing=SHIKIMORI_IMPORT_FOREGROUND_METADATA_BATCH)
         except ShikimoriError as exc:
             raise HTTPException(502, str(exc)) from None
-        store.import_external_rates(user_id, "shikimori", rates)
-        for rate in rates:
-            metadata = {key: rate.get(key) for key in
-                        ("poster_url", "shikimori_kind", "shikimori_aired_on")}
-            if any(metadata.values()) or not rate["title"].startswith("Shikimori #"):
-                store.save_external_anime_metadata(
-                    "shikimori", rate["external_anime_id"], title=rate["title"],
-                    poster_url=metadata["poster_url"],
-                    kind=metadata["shikimori_kind"], aired_on=metadata["shikimori_aired_on"])
+        persist_shikimori_rates(user_id, rates)
+        metadata_refreshing = any(rate["title"].startswith("Shikimori #") for rate in rates)
+        if metadata_refreshing:
+            schedule_shikimori_metadata_import(user_id, upstream, selected)
         linked = []
         for rate in store.external_user_rates(user_id, "shikimori", linked=True):
             # A previous explicit mapping or an exact provider-ID mapping can
@@ -657,6 +698,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         return {"imported": len(rates), "linked": len(linked), "unmatched": unmatched,
                 "unmatched_total": unmatched_total,
                 "next_offset": len(unmatched) if len(unmatched) < unmatched_total else None,
+                "metadata_refreshing": metadata_refreshing,
                 "policy": "progress=max(local, shikimori); Shikimori status is primary"}
 
     @app.get("/api/shikimori/imports")
