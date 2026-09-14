@@ -6,7 +6,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 class StateError(ValueError):
@@ -110,6 +110,11 @@ class Store:
             with self.db:
                 self._create_v8()
                 self.db.execute("PRAGMA user_version = 8")
+            version = 8
+        if version < 9:
+            with self.db:
+                self._create_v9()
+                self.db.execute("PRAGMA user_version = 9")
 
     def _create_v1(self):
         """Initial schema, kept idempotent for pre-versioned installations."""
@@ -362,6 +367,10 @@ class Store:
             )
         """)
 
+    def _create_v9(self):
+        """Reuse one public Shikimori title cache between all local users."""
+        self.db.execute("ALTER TABLE external_anime_metadata ADD COLUMN title TEXT")
+
     @staticmethod
     def _now(value):
         return time.time() if value is None else float(value)
@@ -509,8 +518,8 @@ class Store:
             self.db.execute("DELETE FROM oauth_states WHERE state=?", (str(state),))
         return row[0] if row and row[1] >= moment else None
 
-    # Shikimori import state. A mapping is only created after an exact MAL
-    # bridge or a user's explicit selection in the Mini App.
+    # Shikimori import state. Shared mappings are written only for an exact MAL
+    # bridge; a manually chosen link remains in that user's rate record.
     def save_external_id(self, series_id, provider, external_id):
         series_id = self._positive_id(series_id, "series_id")
         provider, external_id = str(provider).strip(), str(external_id).strip()
@@ -530,20 +539,50 @@ class Store:
         """, (str(provider).strip(), str(external_id).strip())).fetchone()
         return int(row[0]) if row else None
 
-    def save_external_anime_metadata(self, provider, external_id, *, poster_url=None, kind=None,
-                                     aired_on=None, now=None):
+    def save_external_anime_metadata(self, provider, external_id, *, title=None, poster_url=None,
+                                     kind=None, aired_on=None, now=None):
         provider, external_id = str(provider).strip(), str(external_id).strip()
         if not provider or not external_id:
             raise ValueError("External provider and id are required")
+        title = str(title).strip()[:500] if title is not None else None
+        title = title or None
         with self.db:
             self.db.execute("""
                 INSERT INTO external_anime_metadata(
-                    provider, external_id, poster_url, kind, aired_on, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    provider, external_id, poster_url, kind, aired_on, updated_at, title
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(provider, external_id) DO UPDATE SET
-                    poster_url=excluded.poster_url, kind=excluded.kind, aired_on=excluded.aired_on,
+                    poster_url=COALESCE(excluded.poster_url, external_anime_metadata.poster_url),
+                    kind=COALESCE(excluded.kind, external_anime_metadata.kind),
+                    aired_on=COALESCE(excluded.aired_on, external_anime_metadata.aired_on),
+                    title=COALESCE(excluded.title, external_anime_metadata.title),
                     updated_at=excluded.updated_at
-            """, (provider, external_id, poster_url, kind, aired_on, self._now(now)))
+            """, (provider, external_id, poster_url, kind, aired_on, self._now(now), title))
+
+    def external_anime_metadata(self, provider, external_id):
+        row = self.db.execute("""
+            SELECT title, poster_url, kind, aired_on, updated_at
+            FROM external_anime_metadata WHERE provider=? AND external_id=?
+        """, (str(provider).strip(), str(external_id).strip())).fetchone()
+        keys = ("title", "poster_url", "kind", "aired_on", "updated_at")
+        return dict(zip(keys, row)) if row else None
+
+    def external_anime_metadata_many(self, provider, external_ids):
+        """Read shared non-secret metadata in bounded SQLite batches."""
+        ids = list(dict.fromkeys(str(value).strip() for value in external_ids if str(value).strip()))
+        result = {}
+        for offset in range(0, len(ids), 900):
+            batch = ids[offset:offset + 900]
+            placeholders = ", ".join("?" for _ in batch)
+            rows = self.db.execute(f"""
+                SELECT external_id, title, poster_url, kind, aired_on, updated_at
+                FROM external_anime_metadata
+                WHERE provider=? AND external_id IN ({placeholders})
+            """, (str(provider).strip(), *batch)).fetchall()
+            for row in rows:
+                result[str(row[0])] = dict(zip(
+                    ("title", "poster_url", "kind", "aired_on", "updated_at"), row[1:]))
+        return result
 
     def shikimori_library_metadata(self, user_id):
         """Return public Shikimori card fields for this user's linked titles only."""
@@ -651,6 +690,20 @@ class Store:
         """, (user_id, str(provider), str(rate_id))).fetchone()
         return self._external_rate(row)
 
+    def search_unlinked_external_user_rates(self, user_id, provider, query, limit=20):
+        """Search only this user's unlinked imported titles; no upstream request."""
+        user_id = self._positive_id(user_id, "user_id")
+        query = str(query or "").strip()
+        limit = max(1, min(50, int(limit)))
+        rows = self.external_user_rates(user_id, provider, linked=False, limit=5000)
+        if not query:
+            return rows[:limit]
+        needle = " ".join(query.casefold().split())
+        matches = [row for row in rows if needle in " ".join(row["title"].casefold().split())]
+        matches.sort(key=lambda row: (not row["title"].casefold().startswith(needle),
+                                      row["title"].casefold()))
+        return matches[:limit]
+
     def link_external_user_rate(self, user_id, provider, rate_id, series_id):
         user_id = self._positive_id(user_id, "user_id")
         series_id = self._positive_id(series_id, "series_id")
@@ -661,6 +714,24 @@ class Store:
                 UPDATE external_user_rates SET anime365_series_id=?
                 WHERE user_id=? AND provider=? AND external_rate_id=?
             """, (series_id, user_id, str(provider), str(rate_id)))
+        return self.external_user_rate(user_id, provider, rate_id) if cursor.rowcount else None
+
+    def replace_external_user_rate_link(self, user_id, provider, rate_id, series_id):
+        """Bind one chosen provider rate to a local title without deleting history."""
+        user_id = self._positive_id(user_id, "user_id")
+        series_id = self._positive_id(series_id, "series_id")
+        provider, rate_id = str(provider), str(rate_id)
+        if not self.has_watchlist(user_id, series_id):
+            return None
+        with self.db:
+            self.db.execute("""
+                UPDATE external_user_rates SET anime365_series_id=NULL
+                WHERE user_id=? AND provider=? AND anime365_series_id=? AND external_rate_id<>?
+            """, (user_id, provider, series_id, rate_id))
+            cursor = self.db.execute("""
+                UPDATE external_user_rates SET anime365_series_id=?
+                WHERE user_id=? AND provider=? AND external_rate_id=?
+            """, (series_id, user_id, provider, rate_id))
         return self.external_user_rate(user_id, provider, rate_id) if cursor.rowcount else None
 
     def external_rate_for_series(self, user_id, provider, series_id):

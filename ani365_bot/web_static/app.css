@@ -9,7 +9,9 @@ h1, h2 { margin: 18px 0 10px; } h1 { font-size: 24px; } h2 { font-size: 19px; }
 .download-group { margin: 18px 0; }.download-group h2 { margin-bottom: 8px; }.download-group .panel { margin: 8px 0; }
 .card button { width: 100%; text-align: left; background: transparent; color: inherit; border: 0; font: inherit; padding: 0; }
 .poster { width: 100%; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 9px; display: block; margin-bottom: 9px; background: #111; }
-.detail-poster { width: 124px; max-height: 186px; object-fit: cover; border-radius: 10px; float: right; margin: 0 0 10px 12px; background: #111; }
+.title-header { display: flex; align-items: flex-start; gap: 12px; margin: 18px 0 10px; }
+.title-header h1 { margin: 0 0 10px; }.title-header > div { min-width: 0; flex: 1; }
+.detail-poster { width: 124px; max-height: 186px; object-fit: cover; border-radius: 10px; flex: 0 0 auto; background: #111; }
 .meta { color: var(--tg-theme-hint-color, #a8b3c0); font-size: 14px; margin-top: 6px; }
 button, input, select { font: inherit; } button.action { border: 0; border-radius: 10px; padding: 11px 14px; background: var(--tg-theme-button-color, #2ea6ff); color: var(--tg-theme-button-text-color, #fff); margin: 5px 5px 5px 0; }
 button.secondary { background: var(--tg-theme-secondary-bg-color, #243241); color: inherit; }
@@ -18,3 +20,4 @@ input, select { width: 100%; padding: 12px; border-radius: 10px; border: 0; marg
 input[type="checkbox"] { width: auto; padding: 0; margin-right: 6px; }
 video { width: 100%; max-height: 75vh; background: #000; border-radius: 12px; }
 .error { color: #ff8888; white-space: pre-wrap; } .back { margin-top: 12px; }
+@media (max-width: 360px) { .title-header { display: block; }.detail-poster { display: block; margin: 0 auto 12px; } }

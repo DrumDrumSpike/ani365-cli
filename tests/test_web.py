@@ -342,6 +342,50 @@ class WebTests(unittest.TestCase):
         self.store.add_allowed_user(7, owner_id=42)
         self.assertNotIn("poster_url", self.client.get("/api/library", headers=self.headers(7)).json()["items"])
 
+    def test_shikimori_import_reuses_shared_metadata_for_another_user(self):
+        self.store.add_allowed_user(7, owner_id=42)
+        self.store.save_external_account(7, "shikimori", "access", "refresh", time.time() + 3600, "7000")
+        self.store.save_external_anime_metadata(
+            "shikimori", "701", title="Shared title",
+            poster_url="https://shikimori.one/system/animes/preview/701.jpg")
+        shikimori = type("Shikimori", (), {})()
+        shikimori.user_rates = AsyncMock(return_value=[{
+            "id": 51, "target_id": 701, "target_type": "Anime", "status": "watching", "episodes": 1,
+        }])
+        shikimori.animes = AsyncMock()
+        self.app.state.shikimori = shikimori
+        result = self.client.post("/api/shikimori/import", headers=self.headers(7),
+                                  json={"statuses": ["watching"]})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(self.store.external_user_rate(7, "shikimori", "51")["title"], "Shared title")
+        shikimori.animes.assert_not_awaited()
+
+    def test_card_shikimori_link_is_private_and_does_not_change_global_mapping(self):
+        self.store.add_watchlist(42, 55, "Local title")
+        self.store.import_external_rates(42, "shikimori", [{
+            "external_rate_id": "50", "external_anime_id": "700", "status": "watching",
+            "episodes": 2, "title": "Shikimori title",
+        }])
+        shikimori = type("Shikimori", (), {})()
+        shikimori.anime = AsyncMock(return_value={
+            "id": 700, "russian": "Shikimori title", "kind": "tv", "image": {"preview": "/system/animes/preview/700.jpg"},
+        })
+        self.app.state.shikimori = shikimori
+        found = self.client.get("/api/library/55/shikimori-rates?query=Shikimori", headers=self.headers(42))
+        self.assertEqual(found.json()["items"][0]["external_rate_id"], "50")
+        linked = self.client.post("/api/library/55/shikimori-link", headers=self.headers(42),
+                                  json={"external_rate_id": "50"})
+        self.assertEqual(linked.status_code, 200)
+        self.assertEqual(self.store.external_rate_for_series(42, "shikimori", 55)["external_rate_id"], "50")
+        self.assertEqual(self.store.external_series_id("shikimori", "700"), None)
+        self.assertEqual(self.client.get("/api/library", headers=self.headers(42)).json()["items"][0]["poster_url"],
+                         "https://shikimori.one/system/animes/preview/700.jpg")
+        self.store.add_allowed_user(7, owner_id=42)
+        self.store.add_watchlist(7, 55, "Other local title")
+        self.assertEqual(self.client.get("/api/library/55/shikimori-rates?query=Shikimori", headers=self.headers(7)).json()["items"], [])
+        self.assertEqual(self.client.post("/api/library/55/shikimori-link", headers=self.headers(7),
+                                          json={"external_rate_id": "50"}).status_code, 404)
+
     def test_library_new_episodes_uses_cached_watcher_data_for_owner_only(self):
         self.store.add_watchlist(42, 55, "Title")
         self.store.update_progress(42, 55, {"id": 700, "episodeFull": "7"})
