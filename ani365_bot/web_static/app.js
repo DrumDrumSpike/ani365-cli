@@ -177,16 +177,48 @@
       });
     } catch(error) { fail(error); }
   }
+  function episodePicker(data) {
+    const episodes = data.episodes || [];
+    const focusIndex = Math.max(0, episodes.findIndex(item => Number(item.id) === Number(state.episodeFocusId)));
+    const all = state.episodesFullyOpen === true;
+    const radius = Math.max(2, Number(state.episodeRadius) || 2);
+    const windowSize = Math.min(episodes.length, radius * 2 + 1);
+    const start = all ? 0 : Math.min(Math.max(0, focusIndex - radius), episodes.length - windowSize);
+    const end = all ? episodes.length : start + windowSize;
+    const visible = episodes.slice(start, end);
+    const hasMore = start > 0 || end < episodes.length;
+    return `<div id="episode-picker"><div class="episodes">${visible.map(ep => `<button class="action ${ep.watched ? 'secondary' : ''} ${Number(ep.id) === Number(state.episodeFocusId) ? 'current-episode' : ''}" data-episode="${ep.id}">${ep.watched ? '✓ ' : ''}${esc(ep.number)}</button>`).join('')}</div>${hasMore ? `<div class="episode-actions"><span class="meta">Показано ${visible.length} из ${episodes.length}</span><button class="action secondary" id="show-more-episodes">Показать ещё</button><button class="action secondary" id="show-all-episodes">Открыть полностью</button></div>` : ''}</div>`;
+  }
+  function bindEpisodePicker(data) {
+    root.querySelectorAll('[data-episode]').forEach(button => button.onclick = () => selectEpisode(Number(button.dataset.episode)));
+    const more = root.querySelector('#show-more-episodes');
+    if (more) more.onclick = () => {
+      state.episodeRadius = Math.min(data.episodes.length, (Number(state.episodeRadius) || 2) + 5);
+      root.querySelector('#episode-picker').outerHTML = episodePicker(data);
+      bindEpisodePicker(data);
+    };
+    const all = root.querySelector('#show-all-episodes');
+    if (all) all.onclick = () => {
+      state.episodesFullyOpen = true;
+      root.querySelector('#episode-picker').outerHTML = episodePicker(data);
+      bindEpisodePicker(data);
+    };
+  }
   async function details(seriesId) {
     try {
       state.view = 'details';
       const data = await api(`/api/library/${seriesId}`); state.selected = data;
       const p = data.playback;
+      const nextEpisode = data.episodes.find(item => !item.watched) || data.episodes[data.episodes.length - 1];
+      const resumeEpisode = data.episodes.find(item => Number(item.id) === Number(p?.episode_id));
+      state.episodeFocusId = resumeEpisode?.id || nextEpisode?.id || null;
+      state.episodeRadius = 2;
+      state.episodesFullyOpen = false;
       const currentMode = data.item.notifications_enabled ? data.item.notification_mode : '';
       const shikimori = data.item.shikimori_status
         ? `<section class="panel"><h2>Shikimori</h2><select id="shiki-status">${[['planned','Запланировано'],['watching','Смотрю'],['rewatching','Пересматриваю'],['completed','Просмотрено'],['on_hold','Отложено'],['dropped','Брошено']].map(([value,label]) => `<option value="${value}" ${data.item.shikimori_status === value ? 'selected' : ''}>${label}</option>`).join('')}</select><button class="action secondary" id="save-shiki-status">Сохранить статус</button><button class="action secondary" id="refresh-shikimori">Обновить обложку</button><button class="action secondary" id="choose-shikimori">Перепривязать Shikimori</button></section>`
         : `<section class="panel"><h2>Shikimori</h2><p class="meta">Привяжите тайтл из уже импортированного списка, чтобы добавить статус и обложку.</p><button class="action secondary" id="choose-shikimori">Привязать Shikimori</button></section>`;
-      root.innerHTML = `<section class="title-header"><div><h1>${esc(data.item.title)}</h1><p class="meta">Просмотрено: ${esc(data.item.last_watched_episode_number || 0)} / ${data.episodes.length}${data.item.shikimori_status ? ` · Shikimori: ${esc(shikimoriStatus(data.item.shikimori_status))}` : ''}</p>${p ? `<button class="action" id="resume">Продолжить с ${Math.floor(p.position_seconds/60)}:${String(Math.floor(p.position_seconds%60)).padStart(2,'0')}</button>` : ''}</div>${data.item.poster_url ? `<img class="detail-poster" src="${esc(data.item.poster_url)}" alt="" loading="lazy">` : ''}</section><section class="panel"><h2>Уведомления</h2><select id="notification-mode"><option value="">Отключены</option><option value="any" ${currentMode === 'any' ? 'selected' : ''}>Любая новая серия</option><option value="subtitles" ${currentMode === 'subtitles' ? 'selected' : ''}>Русские субтитры</option><option value="voice" ${currentMode === 'voice' ? 'selected' : ''}>Русская озвучка</option></select><button class="action secondary" id="save-notifications">Сохранить уведомления</button></section>${shikimori}<h2>Серии</h2><div class="episodes">${data.episodes.map(ep => `<button class="action ${ep.watched ? 'secondary' : ''}" data-episode="${ep.id}">${ep.watched ? '✓ ' : ''}${esc(ep.number)}</button>`).join('')}</div><button class="action secondary" id="remove-series">Удалить из «Смотрю»</button><button class="action secondary back">Назад</button>`;
+      root.innerHTML = `<section class="title-header"><div><h1>${esc(data.item.title)}</h1><p class="meta">Просмотрено: ${esc(data.item.last_watched_episode_number || 0)} / ${data.episodes.length}${data.item.shikimori_status ? ` · Shikimori: ${esc(shikimoriStatus(data.item.shikimori_status))}` : ''}</p>${p ? `<button class="action" id="resume">Продолжить с ${Math.floor(p.position_seconds/60)}:${String(Math.floor(p.position_seconds%60)).padStart(2,'0')}</button>` : ''}</div>${data.item.poster_url ? `<img class="detail-poster" src="${esc(data.item.poster_url)}" alt="" loading="lazy">` : ''}</section><section class="panel"><h2>Уведомления</h2><select id="notification-mode"><option value="">Отключены</option><option value="any" ${currentMode === 'any' ? 'selected' : ''}>Любая новая серия</option><option value="subtitles" ${currentMode === 'subtitles' ? 'selected' : ''}>Русские субтитры</option><option value="voice" ${currentMode === 'voice' ? 'selected' : ''}>Русская озвучка</option></select><button class="action secondary" id="save-notifications">Сохранить уведомления</button></section>${shikimori}<h2>Серии</h2>${episodePicker(data)}<button class="action secondary" id="remove-series">Удалить из «Смотрю»</button><button class="action secondary back">Назад</button>`;
       useBack(); root.querySelector('.back').onclick = back;
       root.querySelector('#save-notifications').onclick = async () => { try {
         const mode = root.querySelector('#notification-mode').value;
@@ -198,7 +230,7 @@
       const refresh = root.querySelector('#refresh-shikimori');
       if (refresh) refresh.onclick = async () => { try { refresh.disabled = true; refresh.textContent = 'Обновляем…'; await api(`/api/library/${seriesId}/shikimori-metadata`, {method:'POST'}); details(seriesId); } catch(error) { fail(error); } };
       if (p) root.querySelector('#resume').onclick = () => selectEpisode(p.episode_id);
-      root.querySelectorAll('[data-episode]').forEach(button => button.onclick = () => selectEpisode(Number(button.dataset.episode)));
+      bindEpisodePicker(data);
     } catch(error) { fail(error); }
   }
 
