@@ -715,9 +715,11 @@ class Store:
         if not query:
             return rows[:limit]
         needle = " ".join(query.casefold().split())
-        matches = [row for row in rows if needle in " ".join(row["title"].casefold().split())]
-        matches.sort(key=lambda row: (not row["title"].casefold().startswith(needle),
-                                      row["title"].casefold()))
+        matches = [row for row in rows if needle == row["external_anime_id"]
+                   or needle == row["external_rate_id"]
+                   or needle in " ".join(row["title"].casefold().split())]
+        matches.sort(key=lambda row: (needle not in {row["external_anime_id"], row["external_rate_id"]},
+                                      not row["title"].casefold().startswith(needle), row["title"].casefold()))
         return matches[:limit]
 
     def link_external_user_rate(self, user_id, provider, rate_id, series_id):

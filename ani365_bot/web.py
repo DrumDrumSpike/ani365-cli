@@ -273,14 +273,18 @@ def _shikimori_title(rate, anime=None):
 def _shikimori_public_metadata(anime):
     """Keep only an allow-listed public Shikimori poster URL and small labels."""
     if not isinstance(anime, dict):
-        return {}
+        return {"poster_url": None, "shikimori_kind": None, "shikimori_aired_on": None}
     image = anime.get("image") if isinstance(anime.get("image"), dict) else {}
-    value = image.get("preview")
+    poster_data = anime.get("poster") if isinstance(anime.get("poster"), dict) else {}
+    value = poster_data.get("previewUrl") or image.get("preview")
     parts = urlsplit(value) if isinstance(value, str) else None
     poster = None
-    if parts and not parts.scheme and not parts.netloc and parts.path.startswith("/system/animes/") \
-            and ".." not in parts.path:
-        poster = "https://shikimori.one" + value
+    if parts and ".." not in parts.path and "missing_" not in parts.path:
+        if not parts.scheme and not parts.netloc and parts.path.startswith("/system/animes/"):
+            poster = "https://shikimori.one" + parts.path
+        elif parts.scheme == "https" and parts.netloc in {"shikimori.one", "shikimori.io"} \
+                and parts.path.startswith("/uploads/poster/animes/"):
+            poster = f"https://{parts.netloc}{parts.path}"
     return {"poster_url": poster, "shikimori_kind": str(anime.get("kind") or "")[:32] or None,
             "shikimori_aired_on": str(anime.get("aired_on") or "")[:32] or None}
 
@@ -437,6 +441,16 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         cached_title = _shikimori_title({}, external)
         if cached_title.startswith("Shikimori #"):
             cached_title = rate["title"]
+        if not public["poster_url"]:
+            try:
+                graphql = (await app.state.shikimori.posters([rate["external_anime_id"]])).get(
+                    rate["external_anime_id"])
+            except ShikimoriError:
+                graphql = None
+            graphql_public = _shikimori_public_metadata(graphql)
+            public["poster_url"] = graphql_public["poster_url"] or public["poster_url"]
+            if cached_title.startswith("Shikimori #"):
+                cached_title = _shikimori_title({}, graphql)
         store.save_external_anime_metadata(
             "shikimori", rate["external_anime_id"], title=cached_title,
             poster_url=public["poster_url"], kind=public["shikimori_kind"],
@@ -466,10 +480,26 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
             return
         if not isinstance(details, dict):
             details = {}
+        public_by_id = {item["external_anime_id"]: _shikimori_public_metadata(
+            details.get(item["external_anime_id"])) for item in pending}
+        missing_posters = [item["external_anime_id"] for item in pending
+                           if not public_by_id[item["external_anime_id"]]["poster_url"]]
+        graphql_posters = {}
+        if missing_posters:
+            try:
+                graphql_posters = await app.state.shikimori.posters(missing_posters)
+            except ShikimoriError:
+                LOG.info("Shikimori GraphQL poster backfill unavailable (user=%s count=%s)",
+                         user_id, len(missing_posters))
+            if not isinstance(graphql_posters, dict):
+                graphql_posters = {}
         for item in pending:
             external = details.get(item["external_anime_id"])
             if isinstance(external, dict):
-                public = _shikimori_public_metadata(external)
+                public = public_by_id[item["external_anime_id"]]
+                graphql_public = _shikimori_public_metadata(
+                    graphql_posters.get(item["external_anime_id"]))
+                public["poster_url"] = graphql_public["poster_url"] or public["poster_url"]
                 cached_title = _shikimori_title({}, external)
                 if cached_title.startswith("Shikimori #"):
                     cached_title = item["title"]

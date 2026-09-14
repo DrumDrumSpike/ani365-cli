@@ -13,6 +13,7 @@ class ShikimoriError(Exception):
 class Shikimori:
     oauth_base = "https://shikimori.io/oauth"
     api_base = "https://shikimori.io/api"
+    graphql_url = "https://shikimori.io/api/graphql"
     anime_batch_size = 50
     # Keep well below both published per-second and per-minute request limits.
     anime_batch_delay = 0.7
@@ -133,6 +134,44 @@ class Shikimori:
         if not isinstance(payload, dict) or payload.get("id") is None:
             raise ShikimoriError("Shikimori вернул неполные данные аниме.")
         return payload
+
+    async def posters(self, anime_ids):
+        """Read current public poster URLs from GraphQL in bounded batches.
+
+        Shikimori v2 intentionally serves a ``missing_preview`` placeholder for
+        some newer titles. GraphQL is their documented source for new posters.
+        """
+        ids, seen = [], set()
+        for value in anime_ids:
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                continue
+            if value > 0 and value not in seen:
+                ids.append(value)
+                seen.add(value)
+        query = "query PosterBatch($ids: String!) { animes(ids: $ids) { id name russian poster { previewUrl } } }"
+        result = {}
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                for offset in range(0, len(ids), self.anime_batch_size):
+                    batch = ids[offset:offset + self.anime_batch_size]
+                    response = await client.post(self.graphql_url, json={
+                        "query": query, "variables": {"ids": ",".join(map(str, batch))},
+                    }, headers={"User-Agent": self.app_name, "Accept": "application/json"})
+                    response.raise_for_status()
+                    payload = response.json()
+                    rows = payload.get("data", {}).get("animes") if isinstance(payload, dict) else None
+                    if not isinstance(rows, list):
+                        raise ValueError
+                    for row in rows:
+                        if isinstance(row, dict) and row.get("id") is not None:
+                            result[str(row["id"])] = row
+                    if offset + self.anime_batch_size < len(ids):
+                        await asyncio.sleep(self.anime_batch_delay)
+        except (httpx.HTTPError, ValueError, TypeError):
+            raise ShikimoriError("Не удалось получить постеры аниме Shikimori.") from None
+        return result
 
     async def update_user_rate(self, access_token, rate_id, *, episodes=None, status=None):
         """Update explicitly chosen user-rate fields without exposing tokens."""

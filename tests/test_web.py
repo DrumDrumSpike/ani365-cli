@@ -382,6 +382,30 @@ class WebTests(unittest.TestCase):
         self.client.get("/api/library", headers=self.headers(42))
         self.assertEqual(shikimori.animes.await_count, 1)
 
+    def test_library_uses_graphql_poster_for_new_shikimori_title(self):
+        self.store.add_watchlist(42, 40361, "Убивая юность")
+        self.store.save_external_account(42, "shikimori", "access", "refresh", time.time() + 3600, "123")
+        self.store.import_external_rates(42, "shikimori", [{
+            "external_rate_id": "50", "external_anime_id": "62391", "status": "watching",
+            "episodes": 0, "title": "Убивая юность",
+        }])
+        self.store.link_external_user_rate(42, "shikimori", "50", 40361)
+        shikimori = type("Shikimori", (), {})()
+        shikimori.animes = AsyncMock(return_value={"62391": {
+            "id": 62391, "russian": "Убивая юность", "image": {"preview": "/assets/globals/missing_preview.jpg"},
+        }})
+        shikimori.posters = AsyncMock(return_value={"62391": {
+            "id": "62391", "russian": "Убивая юность", "poster": {
+                "previewUrl": "https://shikimori.io/uploads/poster/animes/62391/preview-hash.webp",
+            },
+        }})
+        self.app.state.shikimori = shikimori
+        library = self.client.get("/api/library", headers=self.headers(42))
+        self.assertEqual(library.status_code, 200)
+        self.assertEqual(library.json()["items"][0]["poster_url"],
+                         "https://shikimori.io/uploads/poster/animes/62391/preview-hash.webp")
+        self.assertEqual(shikimori.posters.await_args.args, (["62391"],))
+
     def test_card_shikimori_link_is_private_and_does_not_change_global_mapping(self):
         self.store.add_watchlist(42, 55, "Local title")
         self.store.import_external_rates(42, "shikimori", [{

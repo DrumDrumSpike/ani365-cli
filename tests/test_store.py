@@ -209,6 +209,8 @@ class StoreTests(unittest.TestCase):
         }])
         found = self.store.search_unlinked_external_user_rates(1, "shikimori", "ФРИРЕН")
         self.assertEqual([row["external_rate_id"] for row in found], ["1"])
+        self.assertEqual([row["external_rate_id"]
+                          for row in self.store.search_unlinked_external_user_rates(1, "shikimori", "501")], ["1"])
         self.assertEqual(self.store.search_unlinked_external_user_rates(2, "shikimori", "Фрирен"), [])
 
     def test_shikimori_public_metadata_is_returned_only_for_linked_owner_titles(self):
