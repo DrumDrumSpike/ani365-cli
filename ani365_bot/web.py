@@ -718,7 +718,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
 
     @app.get("/assets/{asset_name}")
     async def assets(asset_name: str):
-        allowed = {"app.js", "app.css"}
+        allowed = {"app.js", "app.css", "anime-night.webp"}
         if asset_name not in allowed:
             raise HTTPException(404, "Not found")
         return FileResponse(Path(__file__).with_name("web_static") / asset_name,

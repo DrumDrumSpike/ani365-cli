@@ -296,6 +296,11 @@ class WebTests(unittest.TestCase):
     def test_mini_app_shell_and_assets_are_not_cached_between_deploys(self):
         self.assertEqual(self.client.get("/").headers["cache-control"], "no-store, max-age=0")
         self.assertEqual(self.client.get("/assets/app.js").headers["cache-control"], "no-store, max-age=0")
+        hero = self.client.get("/assets/anime-night.webp")
+        self.assertEqual(hero.status_code, 200)
+        self.assertTrue(hero.headers["content-type"].startswith("image/webp"))
+        self.assertEqual(hero.headers["cache-control"], "no-store, max-age=0")
+        self.assertEqual(self.client.get("/assets/../web.py").status_code, 404)
 
     def test_background_shikimori_import_is_owner_bound_and_durable(self):
         self.store.save_external_account(42, "shikimori", "access", "refresh", time.time() + 3600, "123")
