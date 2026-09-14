@@ -179,11 +179,11 @@ class WebTests(unittest.TestCase):
             "quality": 1080, "count": 3, "delivery": "browser",
         })
         self.assertEqual(result.status_code, 200)
-        self.assertEqual(result.json()["queued"], 1)
+        self.assertEqual(result.json()["queued"], 2)
         self.assertEqual(result.json()["skipped_episodes"], ["10"])
-        self.assertEqual(self.app.state.downloads.enqueue.call_count, 1)
+        self.assertEqual(self.app.state.downloads.enqueue.call_count, 2)
         queued = self.store.list_download_jobs(42)
-        self.assertEqual([job["episode_id"] for job in queued], [702])
+        self.assertEqual(sorted(job["episode_id"] for job in queued), [701, 702])
         self.store.add_allowed_user(7, owner_id=42)
         denied = self.client.post("/api/travel", headers=self.headers(7), json={
             "series_id": 55, "anchor_episode_id": 701, "translation_id": 801,

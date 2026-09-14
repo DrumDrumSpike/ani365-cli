@@ -1342,7 +1342,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
 
         Translation IDs are episode-specific.  The selected anchor therefore
         supplies a kind/language/studio preference, which is resolved afresh for
-        every following episode rather than incorrectly reusing its ID.
+        every episode in the batch rather than incorrectly reusing its ID.
         """
         app.state.limiter.check(user_id, "travel", 4)
         watch = store.get_watchlist(user_id, payload.series_id)
@@ -1360,10 +1360,10 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         profile = _translation_profile(selected)
         anchor_index = next(index for index, row in enumerate(episodes)
                             if int(row.get("id", 0)) == payload.anchor_episode_id)
-        # “Next” is defined by the episode the person just selected, rather
-        # than by the 90%-completion marker. A partially watched episode must
-        # therefore still lead to its following episode, never back to #1.
-        unseen = [row for row in episodes[anchor_index + 1:] if not _episode_payload(
+        # Start with the selected episode when it is not watched yet. This lets a
+        # person prepare the episode they are currently on plus following ones;
+        # a completed anchor is naturally skipped.
+        unseen = [row for row in episodes[anchor_index:] if not _episode_payload(
             row, watch.get("last_watched_episode_id"), watch.get("last_watched_episode_number"))["watched"]]
         requested = len(unseen) if payload.all_available else payload.count
         chosen = unseen[:min(requested, TRAVEL_BATCH_LIMIT)]
