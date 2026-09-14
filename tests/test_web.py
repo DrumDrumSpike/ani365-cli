@@ -269,6 +269,51 @@ class WebTests(unittest.TestCase):
         })
         self.assertEqual(denied.status_code, 404)
 
+    def test_batch_download_keeps_each_episode_translation_and_quality_separate(self):
+        self.store.add_watchlist(42, 55, "Title")
+        self.anime.episodes = AsyncMock(return_value=[
+            {"id": 700, "episodeFull": "7", "episodeInt": 7},
+            {"id": 701, "episodeFull": "OVA 1", "episodeInt": 8},
+        ])
+        self.anime.translations = AsyncMock(side_effect=lambda episode_id: {
+            700: [{"id": 800, "type": "subRu"}],
+            701: [{"id": 801, "type": "voiceRu"}],
+        }.get(episode_id, []))
+        self.app.state.downloads.enqueue = MagicMock()
+
+        response = self.client.post("/api/downloads/batch", headers=self.headers(42), json={
+            "series_id": 55, "delivery": "browser", "items": [
+                {"episode_id": 700, "translation_id": 800, "quality": 1080},
+                {"episode_id": 701, "translation_id": 801, "quality": 720},
+            ],
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["queued"], 2)
+        self.assertEqual(response.json()["skipped_episodes"], [])
+        self.assertEqual(self.app.state.downloads.enqueue.call_count, 2)
+        jobs = self.store.list_download_jobs(42)
+        self.assertEqual(
+            {(job["episode_id"], job["translation_id"], job["quality"]) for job in jobs},
+            {(700, 800, 1080), (701, 801, 720)},
+        )
+
+        stale = self.client.post("/api/downloads/batch", headers=self.headers(42), json={
+            "series_id": 55, "delivery": "telegram", "items": [
+                {"episode_id": 701, "translation_id": 800, "quality": 1080},
+            ],
+        })
+        self.assertEqual(stale.status_code, 200)
+        self.assertEqual(stale.json()["queued"], 0)
+        self.assertEqual(stale.json()["skipped_episodes"], ["OVA 1"])
+
+        self.store.add_allowed_user(7, owner_id=42)
+        denied = self.client.post("/api/downloads/batch", headers=self.headers(7), json={
+            "series_id": 55, "delivery": "browser", "items": [
+                {"episode_id": 700, "translation_id": 800, "quality": 1080},
+            ],
+        })
+        self.assertEqual(denied.status_code, 404)
+
     def test_clear_downloads_hides_only_owner_finished_jobs(self):
         self.store.add_watchlist(42, 55, "Visible title")
         self.store.add_allowed_user(7, owner_id=42)

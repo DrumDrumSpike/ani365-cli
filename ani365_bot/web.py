@@ -42,6 +42,7 @@ HLS_PLAYLIST_MAX_BYTES = 2 * 1024 * 1024
 HLS_PLAYLIST_MAX_URIS = 3000
 MAX_POSTER_BYTES = 5 * 1024 * 1024
 TRAVEL_BATCH_LIMIT = 25
+BATCH_DOWNLOAD_LIMIT = 50
 SHIKIMORI_AUTO_LINK_BATCH = 50
 SHIKIMORI_IMPORT_PAGE_SIZE = 50
 SHIKIMORI_IMPORT_FOREGROUND_METADATA_BATCH = 50
@@ -270,6 +271,20 @@ class DownloadRequest(BaseModel):
     episode_id: int = Field(gt=0)
     translation_id: int = Field(gt=0)
     quality: int = Field(gt=0, le=10000)
+    delivery: str = Field(pattern="^(browser|telegram)$")
+
+
+class BatchDownloadItem(BaseModel):
+    """One deliberately chosen episode and its episode-specific media choice."""
+
+    episode_id: int = Field(gt=0)
+    translation_id: int = Field(gt=0)
+    quality: int = Field(gt=0, le=10000)
+
+
+class BatchDownloadRequest(BaseModel):
+    series_id: int = Field(gt=0)
+    items: list[BatchDownloadItem] = Field(min_length=1, max_length=BATCH_DOWNLOAD_LIMIT)
     delivery: str = Field(pattern="^(browser|telegram)$")
 
 
@@ -1484,6 +1499,59 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
             raise HTTPException(404, "Anime is not in your library.")
         app.state.downloads.enqueue(job_id)
         return job
+
+    @app.post("/api/downloads/batch")
+    async def create_batch_download(payload: BatchDownloadRequest, user_id=Depends(authenticated_user)):
+        """Queue explicitly configured Anime365 episodes in one request.
+
+        Translation identifiers belong to a particular episode.  Unlike travel
+        mode, this endpoint never tries to infer a replacement translation or
+        quality: the Mini App has already shown the available choices for each
+        selected episode.  A title with OVA, duplicate numbering, or uneven
+        releases can therefore be prepared without a surprising fallback.
+        """
+        app.state.limiter.check(user_id, "batch-download", 4)
+        if is_hentai_series(payload.series_id):
+            raise HTTPException(422, "Пакетная настройка доступна в каталоге Anime365.")
+        if not store.has_watchlist(user_id, payload.series_id):
+            raise HTTPException(404, "Anime is not in your library.")
+        selected_ids = [item.episode_id for item in payload.items]
+        if len(set(selected_ids)) != len(selected_ids):
+            raise HTTPException(422, "Каждую серию можно настроить только один раз.")
+        try:
+            source, _token, upstream_series_id, _provider = source_for_series(payload.series_id)
+            episodes = await source.episodes(upstream_series_id)
+        except APIError as exc:
+            _api_error(exc)
+        by_episode = {int(row.get("id", 0)): row for row in episodes}
+        jobs, skipped = [], []
+        for item in payload.items:
+            episode = by_episode.get(item.episode_id)
+            episode_number = str((episode or {}).get("episodeFull") or
+                                 (episode or {}).get("episodeInt") or item.episode_id)
+            if episode is None:
+                skipped.append(episode_number)
+                continue
+            try:
+                translations = await source.translations(item.episode_id)
+            except APIError:
+                # One deleted or temporarily unavailable release must not make
+                # the other explicitly configured episodes disappear.
+                skipped.append(episode_number)
+                continue
+            if not any(int(row.get("id", 0)) == item.translation_id for row in translations):
+                skipped.append(episode_number)
+                continue
+            job_id = secrets.token_urlsafe(24)
+            job = store.create_download_job(
+                job_id, user_id, payload.series_id, item.episode_id, episode_number,
+                item.translation_id, item.quality, payload.delivery)
+            if job is not None:
+                app.state.downloads.enqueue(job_id)
+                jobs.append(job)
+        return {"requested": len(payload.items), "queued": len(jobs), "jobs": jobs,
+                "skipped_episodes": skipped,
+                "message": "Каждая серия будет скачана с выбранным для неё переводом и качеством."}
 
     @app.post("/api/travel")
     async def travel(payload: TravelRequest, user_id=Depends(authenticated_user)):

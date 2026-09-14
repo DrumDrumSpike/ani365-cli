@@ -3,7 +3,7 @@
   const root = document.getElementById('app');
   const initData = telegram ? telegram.initData : '';
   if (telegram) { telegram.ready(); telegram.expand(); }
-  const state = { library: [], selected: null, episode: null, translation: null, quality: null, player: null, view: 'home', hls: null, hlsLoad: null };
+  const state = { library: [], selected: null, episode: null, translation: null, quality: null, player: null, view: 'home', hls: null, hlsLoad: null, batchDownload: null };
   const esc = value => String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
   async function api(path, options = {}) {
     const headers = { ...(options.headers || {}) };
@@ -224,7 +224,7 @@
         ? `<section class="panel"><h2>Shikimori</h2><select id="shiki-status">${[['planned','Запланировано'],['watching','Смотрю'],['rewatching','Пересматриваю'],['completed','Просмотрено'],['on_hold','Отложено'],['dropped','Брошено']].map(([value,label]) => `<option value="${value}" ${data.item.shikimori_status === value ? 'selected' : ''}>${label}</option>`).join('')}</select><button class="action secondary" id="save-shiki-status">Сохранить статус</button><button class="action secondary" id="refresh-shikimori">Обновить обложку</button><button class="action secondary" id="choose-shikimori">Перепривязать Shikimori</button></section>`
         : `<section class="panel"><h2>Shikimori</h2><p class="meta">Привяжите тайтл из уже импортированного списка, чтобы добавить статус и обложку.</p><button class="action secondary" id="choose-shikimori">Привязать Shikimori</button></section>`;
       const notifications = isHentai ? '' : `<section class="panel"><h2>Уведомления</h2><select id="notification-mode"><option value="">Отключены</option><option value="any" ${currentMode === 'any' ? 'selected' : ''}>Любая новая серия</option><option value="subtitles" ${currentMode === 'subtitles' ? 'selected' : ''}>Русские субтитры</option><option value="voice" ${currentMode === 'voice' ? 'selected' : ''}>Русская озвучка</option></select><button class="action secondary" id="save-notifications">Сохранить уведомления</button></section>`;
-      root.innerHTML = `<section class="title-header"><div><h1>${esc(data.item.title)}</h1><p class="meta">Просмотрено: ${esc(data.item.last_watched_episode_number || 0)} / ${data.episodes.length}${data.item.shikimori_status ? ` · Shikimori: ${esc(shikimoriStatus(data.item.shikimori_status))}` : ''}</p>${p ? `<button class="action" id="resume">Продолжить с ${Math.floor(p.position_seconds/60)}:${String(Math.floor(p.position_seconds%60)).padStart(2,'0')}</button>` : ''}</div>${data.item.poster_url ? `<img class="detail-poster" src="${esc(data.item.poster_url)}" alt="" loading="lazy">` : ''}</section>${notifications}${shikimori}<h2>Серии</h2>${episodePicker(data)}<button class="action secondary" id="remove-series">Удалить из «Смотрю»</button><button class="action secondary back">Назад</button>`;
+      root.innerHTML = `<section class="title-header"><div><h1>${esc(data.item.title)}</h1><p class="meta">Просмотрено: ${esc(data.item.last_watched_episode_number || 0)} / ${data.episodes.length}${data.item.shikimori_status ? ` · Shikimori: ${esc(shikimoriStatus(data.item.shikimori_status))}` : ''}</p>${p ? `<button class="action" id="resume">Продолжить с ${Math.floor(p.position_seconds/60)}:${String(Math.floor(p.position_seconds%60)).padStart(2,'0')}</button>` : ''}</div>${data.item.poster_url ? `<img class="detail-poster" src="${esc(data.item.poster_url)}" alt="" loading="lazy">` : ''}</section>${notifications}${shikimori}<h2>Серии</h2>${episodePicker(data)}${isHentai ? '' : '<button class="action secondary" id="batch-download">Скачать серии</button>'}<button class="action secondary" id="remove-series">Удалить из «Смотрю»</button><button class="action secondary back">Назад</button>`;
       useBack(); root.querySelector('.back').onclick = back;
       const saveNotifications = root.querySelector('#save-notifications'); if (saveNotifications) saveNotifications.onclick = async () => { try {
         const mode = root.querySelector('#notification-mode').value;
@@ -236,6 +236,7 @@
       const refresh = root.querySelector('#refresh-shikimori');
       if (refresh) refresh.onclick = async () => { try { refresh.disabled = true; refresh.textContent = 'Обновляем…'; await api(`/api/library/${seriesId}/shikimori-metadata`, {method:'POST'}); details(seriesId); } catch(error) { fail(error); } };
       if (p) root.querySelector('#resume').onclick = () => selectEpisode(p.episode_id);
+      const batchDownload = root.querySelector('#batch-download'); if (batchDownload) batchDownload.onclick = startBatchDownload;
       bindEpisodePicker(data);
     } catch(error) { fail(error); }
   }
@@ -262,6 +263,91 @@
   const jobStatus = status => ({queued:'В очереди',preparing:'Подготавливается',ready:'Готово',sent:'Отправлено в Telegram',failed:'Не удалось подготовить',cancelled:'Отменено',expired:'Срок хранения истёк'}[status] || status);
   async function downloads() { try { state.view = 'downloads'; const data = await api('/api/downloads'); const groups = new Map(); data.items.forEach(job => { const name = job.series_title || `Аниме #${job.series_id}`; groups.set(name, [...(groups.get(name) || []), job]); }); const rows = [...groups.entries()].map(([name,jobs]) => `<section class="download-group"><h2>${esc(name)}</h2>${jobs.map(job => `<article class="panel"><strong>Серия ${esc(job.episode_number)} · ${esc(job.quality)}p</strong><p class="meta">${esc(jobStatus(job.status))}${job.delivery === 'telegram' ? ' · Telegram' : ''}</p>${job.status === 'ready' ? `<button class="action" data-file="${esc(job.id)}">Скачать MKV</button>` : ''}${['queued','preparing'].includes(job.status) ? `<button class="action secondary" data-cancel="${esc(job.id)}">Отменить</button>` : ''}${job.status === 'failed' ? '<p class="meta">Попробуйте другой перевод или качество.</p>' : ''}</article>`).join('')}</section>`).join(''); const hasFinished = data.items.some(job => !['queued','preparing'].includes(job.status)); root.innerHTML = `<section class="page-heading"><p class="eyebrow">Offline</p><h1>Загрузки</h1></section>${rows || '<p class="empty">Нет активных или готовых загрузок.</p>'}<button class="action secondary" id="refresh">Обновить</button>${hasFinished ? '<button class="action secondary" id="clear">Скрыть завершённые</button>' : ''}<button class="action secondary back">Назад</button>`; useBack(); root.querySelector('#refresh').onclick = downloads; root.querySelector('.back').onclick = home; if (hasFinished) root.querySelector('#clear').onclick = async () => { try { await api('/api/downloads/clear', {method:'POST'}); downloads(); } catch(error) { fail(error); } }; root.querySelectorAll('[data-cancel]').forEach(button => button.onclick = async () => { try { await api('/api/downloads/' + encodeURIComponent(button.dataset.cancel), {method:'DELETE'}); downloads(); } catch(error) { fail(error); } }); root.querySelectorAll('[data-file]').forEach(button => button.onclick = async () => { try { const ticket = await api('/api/downloads/' + encodeURIComponent(button.dataset.file) + '/ticket', {method:'POST'}); location.href = ticket.url; } catch(error) { fail(error); } }); } catch(error) { fail(error); } }
   async function travelMode(quality) { root.innerHTML = `<h1>В поездку</h1><p class="meta">${esc(state.selected.item.title)} · ${quality}p. В очередь попадёт текущая серия, если она ещё не просмотрена, и следующие. Будет использован выбранный перевод или доступный перевод того же типа и языка.</p><section class="panel"><label>Куда отправить<select id="travel-delivery"><option value="browser">Скачать через Mini App</option><option value="telegram">Отправить в Telegram</option></select></label></section><button class="action" data-travel-count="1">Текущую серию</button><button class="action" data-travel-count="3">Текущую и следующие 2</button><button class="action" data-travel-count="5">Текущую и следующие 4</button><button class="action secondary" data-travel-all="true">Все непросмотренные от текущей</button><button class="action secondary back">Назад</button>`; useBack(); root.querySelector('.back').onclick = () => qualities(state.translation); const start = async (count, allAvailable) => { try { const data = await api('/api/travel', {method:'POST',body:JSON.stringify({series_id:state.selected.item.series_id,anchor_episode_id:state.episode.id,translation_id:state.translation,quality,count,all_available:allAvailable,delivery:root.querySelector('#travel-delivery').value})}); root.innerHTML = `<h1>Подготовка поставлена в очередь</h1><p class="meta">Добавлено: ${esc(data.queued)} из ${esc(data.requested)}. ${esc(data.message)}</p>${data.skipped_episodes.length ? `<p class="meta">Нет подходящего перевода у серий: ${esc(data.skipped_episodes.join(', '))}</p>` : ''}${data.batch_limited ? '<p class="meta">За один запуск можно поставить не более 25 серий.</p>' : ''}<button class="action" id="downloads">Открыть загрузки</button><button class="action secondary back">К аниме</button>`; root.querySelector('#downloads').onclick = downloads; root.querySelector('.back').onclick = () => details(state.selected.item.series_id); } catch(error) { fail(error); } }; root.querySelectorAll('[data-travel-count]').forEach(button => button.onclick = () => start(Number(button.dataset.travelCount), false)); root.querySelector('[data-travel-all]').onclick = () => start(5, true); }
+  function startBatchDownload() {
+    state.batchDownload = {
+      selected: new Set(), configurations: new Map(), query: '', delivery: 'browser',
+    };
+    batchEpisodeSelection();
+  }
+  function batchEpisodes() {
+    return state.selected?.episodes || [];
+  }
+  function batchEpisodeSelection() {
+    const batch = state.batchDownload;
+    if (!batch) return details(state.selected.item.series_id);
+    const render = () => {
+      const query = batch.query.trim().toLocaleLowerCase();
+      const matches = batchEpisodes().filter(episode => !query ||
+        `${episode.number} ${episode.title} ${episode.type}`.toLocaleLowerCase().includes(query));
+      const visible = matches.slice(0, 100);
+      root.innerHTML = `<h1>Скачать серии</h1><p class="meta">Выберите любые серии, включая OVA и дубли. Для каждой затем отдельно выбираются перевод и качество. За один запуск можно подготовить до 50 серий.</p><div class="search-field"><span>⌕</span><input id="batch-episode-query" value="${esc(batch.query)}" placeholder="Номер, название или тип серии"></div><div class="episode-actions"><button class="action secondary" id="batch-select-found">Выбрать найденные</button><button class="action secondary" id="batch-clear">Очистить выбор</button></div><section class="panel"><strong>Выбрано: <span id="batch-selected-count">${batch.selected.size}</span> / 50</strong><div class="batch-episodes">${visible.map(episode => `<label class="batch-episode"><input type="checkbox" data-batch-episode="${episode.id}" ${batch.selected.has(episode.id) ? 'checked' : ''}><span>Серия ${esc(episode.number)}${episode.title ? ` · ${esc(episode.title)}` : ''}${episode.type && episode.type !== 'tv' ? ` · ${esc(episode.type)}` : ''}</span></label>`).join('') || '<p class="empty">Серии не найдены.</p>'}</div>${matches.length > visible.length ? `<p class="meta">Показаны первые ${visible.length} из ${matches.length}. Уточните поиск, чтобы выбрать остальные.</p>` : ''}</section><button class="action" id="batch-configure" ${batch.selected.size ? '' : 'disabled'}>Настроить выбранные (${batch.selected.size})</button><button class="action secondary back">Назад</button>`;
+      useBack();
+      root.querySelector('.back').onclick = () => details(state.selected.item.series_id);
+      root.querySelector('#batch-episode-query').oninput = event => { batch.query = event.target.value; render(); };
+      root.querySelector('#batch-select-found').onclick = () => { matches.slice(0, Math.max(0, 50 - batch.selected.size)).forEach(episode => batch.selected.add(episode.id)); render(); };
+      root.querySelector('#batch-clear').onclick = () => { batch.selected.clear(); batch.configurations.clear(); render(); };
+      root.querySelectorAll('[data-batch-episode]').forEach(input => input.onchange = () => {
+        const id = Number(input.dataset.batchEpisode);
+        if (input.checked && batch.selected.size >= 50) { input.checked = false; return; }
+        if (input.checked) batch.selected.add(id); else { batch.selected.delete(id); batch.configurations.delete(id); }
+        root.querySelector('#batch-selected-count').textContent = String(batch.selected.size);
+        const configure = root.querySelector('#batch-configure'); configure.disabled = !batch.selected.size;
+        configure.textContent = `Настроить выбранные (${batch.selected.size})`;
+      });
+      root.querySelector('#batch-configure').onclick = batchConfiguration;
+    };
+    render();
+  }
+  function batchConfiguration() {
+    const batch = state.batchDownload;
+    if (!batch) return details(state.selected.item.series_id);
+    const episodes = batchEpisodes().filter(episode => batch.selected.has(episode.id));
+    const ready = episodes.filter(episode => batch.configurations.has(episode.id));
+    root.innerHTML = `<h1>Настройка серий</h1><p class="meta">Выберите перевод и качество отдельно для каждой серии. Ненастроенные серии в очередь не попадут.</p><section class="panel"><label>Куда отправить<select id="batch-delivery"><option value="browser" ${batch.delivery === 'browser' ? 'selected' : ''}>Скачать через Mini App</option><option value="telegram" ${batch.delivery === 'telegram' ? 'selected' : ''}>Отправить в Telegram</option></select></label></section>${episodes.map(episode => { const choice = batch.configurations.get(episode.id); return `<section class="panel"><strong>Серия ${esc(episode.number)}${episode.title ? ` · ${esc(episode.title)}` : ''}</strong><p class="meta">${choice ? `${esc(choice.label)} · ${esc(choice.quality)}p` : 'Перевод и качество не выбраны.'}</p><button class="action secondary" data-batch-configure="${episode.id}">${choice ? 'Изменить выбор' : 'Выбрать перевод и качество'}</button></section>`; }).join('')}<button class="action" id="batch-queue" ${ready.length ? '' : 'disabled'}>Добавить в очередь (${ready.length})</button><button class="action secondary back">К выбору серий</button>`;
+    useBack();
+    root.querySelector('#batch-delivery').onchange = event => { batch.delivery = event.target.value; };
+    root.querySelector('.back').onclick = batchEpisodeSelection;
+    root.querySelectorAll('[data-batch-configure]').forEach(button => button.onclick = () => batchTranslations(Number(button.dataset.batchConfigure)));
+    root.querySelector('#batch-queue').onclick = queueBatchDownload;
+  }
+  async function batchTranslations(episodeId) {
+    try {
+      const episode = batchEpisodes().find(item => item.id === episodeId);
+      const data = await api(`/api/episodes/${episodeId}/translations?series_id=${encodeURIComponent(state.selected.item.series_id)}`);
+      root.innerHTML = `<h1>Серия ${esc(episode?.number || '?')}</h1><p class="meta">Выберите перевод для этой серии.</p>${data.groups.map(group => `<section class="panel"><h2>${esc(group.label)}</h2>${group.items.map(item => `<button class="action secondary" data-batch-translation="${item.id}" data-batch-label="${esc(item.authorsSummary || item.title || 'Перевод')}">${esc(item.authorsSummary || item.title || 'Перевод')}</button>`).join('')}</section>`).join('') || '<p class="empty">Для этой серии нет доступных переводов.</p>'}<button class="action secondary back">Назад</button>`;
+      useBack();
+      root.querySelector('.back').onclick = batchConfiguration;
+      root.querySelectorAll('[data-batch-translation]').forEach(button => button.onclick = () => batchQualities(episodeId, Number(button.dataset.batchTranslation), button.dataset.batchLabel));
+    } catch(error) { fail(error); }
+  }
+  async function batchQualities(episodeId, translationId, label) {
+    try {
+      const data = await api(`/api/translations/${translationId}/qualities?series_id=${encodeURIComponent(state.selected.item.series_id)}`);
+      root.innerHTML = `<h1>Качество</h1><p class="meta">${esc(label)} · серия ${esc(batchEpisodes().find(item => item.id === episodeId)?.number || '?')}</p>${data.items.map(quality => `<button class="action" data-batch-quality="${quality}">${esc(quality)}p</button>`).join('') || '<p class="empty">У этого перевода нет доступного качества.</p>'}<button class="action secondary back">Назад</button>`;
+      useBack();
+      root.querySelector('.back').onclick = () => batchTranslations(episodeId);
+      root.querySelectorAll('[data-batch-quality]').forEach(button => button.onclick = () => {
+        state.batchDownload.configurations.set(episodeId, {translation_id: translationId, quality: Number(button.dataset.batchQuality), label});
+        batchConfiguration();
+      });
+    } catch(error) { fail(error); }
+  }
+  async function queueBatchDownload() {
+    try {
+      const batch = state.batchDownload;
+      const items = batchEpisodes().filter(episode => batch.selected.has(episode.id)).map(episode => {
+        const choice = batch.configurations.get(episode.id);
+        return choice && {episode_id: episode.id, translation_id: choice.translation_id, quality: choice.quality};
+      }).filter(Boolean);
+      if (!items.length) return batchConfiguration();
+      const button = root.querySelector('#batch-queue'); button.disabled = true; button.textContent = 'Добавляем в очередь…';
+      const data = await api('/api/downloads/batch', {method:'POST', body:JSON.stringify({series_id: state.selected.item.series_id, delivery: batch.delivery, items})});
+      root.innerHTML = `<h1>Подготовка поставлена в очередь</h1><p class="meta">Добавлено: ${esc(data.queued)} из ${esc(data.requested)}. ${esc(data.message)}</p>${data.skipped_episodes.length ? `<p class="meta">Больше недоступны: ${esc(data.skipped_episodes.join(', '))}. Настройте их заново.</p>` : ''}<button class="action" id="downloads">Открыть загрузки</button><button class="action secondary back">К аниме</button>`;
+      state.batchDownload = null;
+      root.querySelector('#downloads').onclick = downloads;
+      root.querySelector('.back').onclick = () => details(state.selected.item.series_id);
+    } catch(error) { fail(error); }
+  }
   const isHlsSource = value => {
     try { return new URL(String(value), location.href).pathname.toLowerCase().endsWith('.m3u8'); }
     catch (_) { return false; }
