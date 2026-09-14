@@ -10,7 +10,7 @@
     if (initData) headers['X-Telegram-Init-Data'] = initData;
     if (options.body) headers['Content-Type'] = 'application/json';
     const response = await fetch(path, { ...options, headers, credentials: 'same-origin' });
-    if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || 'Не удалось выполнить запрос.'); }
+    if (!response.ok) { const body = await response.json().catch(() => ({})); const detail = typeof body.detail === 'string' ? body.detail : Array.isArray(body.detail) ? body.detail.map(item => item?.msg || 'Некорректные данные.').join(' ') : 'Не удалось выполнить запрос.'; throw new Error(detail); }
     return response.status === 204 ? null : response.json();
   }
   const fail = error => { root.innerHTML = `<p class="error">${esc(error.message || error)}</p>`; };
@@ -68,7 +68,7 @@
   async function search() {
     root.innerHTML = '<h1>Каталог</h1><input id="query" placeholder="Название аниме"><button class="action" id="go">Найти</button><section id="results"></section><button class="action secondary back">Назад</button>';
     useBack(); root.querySelector('.back').onclick = back;
-    root.querySelector('#go').onclick = async () => { try { const data = await api(`/api/catalog?query=${encodeURIComponent(root.querySelector('#query').value)}`); root.querySelector('#results').innerHTML = catalogCards(data.items); root.querySelectorAll('[data-catalog-series]').forEach(button => button.onclick = async () => { try { const item = data.items.find(row => Number(row.series_id) === Number(button.dataset.catalogSeries)); if (!item) throw new Error('Выбранный тайтл больше не найден. Повторите поиск.'); await api('/api/library', { method:'POST', body: JSON.stringify({ series_id:item.series_id, title:item.title, year:item.year, series_type:item.series_type }) }); await details(item.series_id); } catch(error) { fail(error); } }); } catch(error) { fail(error); } };
+    root.querySelector('#go').onclick = async () => { try { const data = await api(`/api/catalog?query=${encodeURIComponent(root.querySelector('#query').value)}`); root.querySelector('#results').innerHTML = catalogCards(data.items); root.querySelectorAll('[data-catalog-series]').forEach(button => button.onclick = async () => { try { const item = data.items.find(row => Number(row.series_id) === Number(button.dataset.catalogSeries)); if (!item) throw new Error('Выбранный тайтл больше не найден. Повторите поиск.'); await api('/api/library', { method:'POST', body: JSON.stringify({ series_id:item.series_id, title:item.title, year:item.year == null ? null : String(item.year), series_type:item.series_type }) }); await details(item.series_id); } catch(error) { fail(error); } }); } catch(error) { fail(error); } };
   }
   function backgroundImportText(item) {
     if (!item) return 'Фоновый импорт будет запущен после подключения.';

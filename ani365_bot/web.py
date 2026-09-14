@@ -164,7 +164,8 @@ class RateLimiter:
 class AddLibraryRequest(BaseModel):
     series_id: int = Field(gt=0)
     title: str = Field(min_length=1, max_length=500)
-    year: str | None = Field(default=None, max_length=30)
+    # Anime365 returns a numeric year while old bot callers may send text.
+    year: str | int | None = None
     series_type: str | None = Field(default=None, max_length=80)
 
 

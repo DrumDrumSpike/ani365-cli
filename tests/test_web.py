@@ -267,6 +267,14 @@ class WebTests(unittest.TestCase):
         self.anime.series_by_mal_id.assert_awaited_once_with("61587")
         self.anime.search.assert_not_awaited()
 
+    def test_catalog_numeric_year_can_be_added_to_library(self):
+        result = self.client.post("/api/library", headers=self.headers(42), json={
+            "series_id": 39395, "title": "Roll Over and Die", "year": 2026,
+            "series_type": "ТВ сериал",
+        })
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(self.store.get_watchlist(42, 39395)["year"], "2026")
+
     def test_mini_app_shell_and_assets_are_not_cached_between_deploys(self):
         self.assertEqual(self.client.get("/").headers["cache-control"], "no-store, max-age=0")
         self.assertEqual(self.client.get("/assets/app.js").headers["cache-control"], "no-store, max-age=0")
