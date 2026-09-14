@@ -41,6 +41,10 @@
     if (!items.length) return '<p class="empty">Пока здесь пусто.</p>';
     return `<section class="grid">${items.map(item => `<article class="card"><button data-series="${item.series_id}">${item.poster_url ? `<img class="poster" src="${esc(item.poster_url)}" alt="" loading="lazy">` : ''}<strong>${esc(item.title)}</strong><div class="meta">${esc(item.last_watched_episode_number || 0)} / ${esc(item.last_available_episode_number || '?')}${resume && item.playback ? ` · ${Math.floor(item.playback.position_seconds / 60)}:${String(Math.floor(item.playback.position_seconds % 60)).padStart(2,'0')}` : ''}${item.shikimori_status ? ` · ${esc(shikimoriStatus(item.shikimori_status))}` : ''}</div></button></article>`).join('')}</section>`;
   }
+  function catalogCards(items) {
+    if (!items.length) return '<p class="empty">Ничего не найдено.</p>';
+    return `<section class="grid">${items.map(item => `<article class="card"><button data-catalog-series="${esc(item.series_id)}">${item.poster_url ? `<img class="poster" src="${esc(item.poster_url)}" alt="" loading="lazy">` : '<div class="poster catalog-placeholder">Anime365</div>'}<strong>${esc(item.title)}</strong><div class="meta">${esc(item.year || 'Год не указан')}${item.series_type ? ` · ${esc(item.series_type)}` : ''}</div></button></article>`).join('')}</section>`;
+  }
   const shikimoriStatus = status => ({planned:'Запланировано',watching:'Смотрю',rewatching:'Пересматриваю',completed:'Просмотрено',on_hold:'Отложено',dropped:'Брошено'}[status] || status);
   async function library() {
     try {
@@ -64,7 +68,7 @@
   async function search() {
     root.innerHTML = '<h1>Каталог</h1><input id="query" placeholder="Название аниме"><button class="action" id="go">Найти</button><section id="results"></section><button class="action secondary back">Назад</button>';
     useBack(); root.querySelector('.back').onclick = back;
-    root.querySelector('#go').onclick = async () => { try { const data = await api(`/api/catalog?query=${encodeURIComponent(root.querySelector('#query').value)}`); root.querySelector('#results').innerHTML = cards(data.items); root.querySelectorAll('[data-series]').forEach(button => button.onclick = async () => { const item = data.items.find(row => Number(row.id) === Number(button.dataset.series)); await api('/api/library', { method:'POST', body: JSON.stringify({ series_id:item.id, title:item.titles?.ru || item.titles?.romaji || item.titles?.en || 'Без названия', year:item.year, series_type:item.typeTitle || item.type }) }); details(item.id); }); } catch(error) { fail(error); } };
+    root.querySelector('#go').onclick = async () => { try { const data = await api(`/api/catalog?query=${encodeURIComponent(root.querySelector('#query').value)}`); root.querySelector('#results').innerHTML = catalogCards(data.items); root.querySelectorAll('[data-catalog-series]').forEach(button => button.onclick = async () => { const item = data.items.find(row => Number(row.series_id) === Number(button.dataset.catalogSeries)); await api('/api/library', { method:'POST', body: JSON.stringify({ series_id:item.series_id, title:item.title, year:item.year, series_type:item.series_type }) }); details(item.series_id); }); } catch(error) { fail(error); } };
   }
   function backgroundImportText(item) {
     if (!item) return 'Фоновый импорт будет запущен после подключения.';

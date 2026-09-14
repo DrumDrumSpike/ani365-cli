@@ -11,6 +11,7 @@ h1, h2 { margin: 18px 0 10px; } h1 { font-size: 24px; } h2 { font-size: 19px; }
 .library-group summary { cursor: pointer; font-size: 19px; font-weight: 700; padding: 13px 0; }.library-group .grid { padding-top: 2px; }
 .card button { width: 100%; text-align: left; background: transparent; color: inherit; border: 0; font: inherit; padding: 0; }
 .poster { width: 100%; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 9px; display: block; margin-bottom: 9px; background: #111; }
+.catalog-placeholder { display: grid; place-items: center; color: var(--tg-theme-hint-color, #a8b3c0); font-size: 14px; }
 .title-header { display: flex; align-items: flex-start; gap: 12px; margin: 18px 0 10px; }
 .title-header h1 { margin: 0 0 10px; }.title-header > div { min-width: 0; flex: 1; }
 .detail-poster { width: 124px; max-height: 186px; object-fit: cover; border-radius: 10px; flex: 0 0 auto; background: #111; }

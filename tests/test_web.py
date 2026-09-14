@@ -234,6 +234,22 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/shikimori/connect", headers=self.headers(42)).status_code, 409)
         self.assertEqual(self.client.get("/api/shikimori/status", headers=self.headers(99)).status_code, 403)
 
+    def test_catalog_normalizes_anime365_results_and_uses_only_confirmed_cached_poster(self):
+        self.anime.search = AsyncMock(return_value=[{
+            "id": 55, "titles": {"ru": "Русское название", "en": "English title"},
+            "year": 2026, "typeTitle": "TV", "myAnimeListId": 700,
+        }])
+        self.store.save_external_id(55, "shikimori", "700")
+        self.store.save_external_anime_metadata(
+            "shikimori", "700", poster_url="https://shikimori.one/system/animes/preview/700.jpg")
+
+        result = self.client.get("/api/catalog?query=название", headers=self.headers(42))
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json()["items"], [{
+            "series_id": 55, "title": "Русское название", "year": 2026,
+            "series_type": "TV", "poster_url": "https://shikimori.one/system/animes/preview/700.jpg",
+        }])
+
     def test_background_shikimori_import_is_owner_bound_and_durable(self):
         self.store.save_external_account(42, "shikimori", "access", "refresh", time.time() + 3600, "123")
         shikimori = type("Shikimori", (), {})()

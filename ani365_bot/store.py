@@ -720,6 +720,31 @@ class Store:
                     ("title", "poster_url", "kind", "aired_on", "updated_at"), row[1:]))
         return result
 
+    def external_anime_metadata_for_series(self, provider, series_ids):
+        """Read shared public metadata only through confirmed provider mappings."""
+        ids = list(dict.fromkeys(
+            int(value) for value in series_ids if isinstance(value, int) or str(value).isdigit()))
+        result = {}
+        for offset in range(0, len(ids), 900):
+            batch = ids[offset:offset + 900]
+            if not batch:
+                continue
+            placeholders = ", ".join("?" for _ in batch)
+            rows = self.db.execute(f"""
+                SELECT mappings.anime365_series_id, metadata.title, metadata.poster_url,
+                       metadata.kind, metadata.aired_on, metadata.updated_at
+                FROM anime_external_ids AS mappings
+                JOIN external_anime_metadata AS metadata
+                  ON metadata.provider=mappings.provider
+                 AND metadata.external_id=mappings.external_id
+                WHERE mappings.provider=?
+                  AND mappings.anime365_series_id IN ({placeholders})
+            """, (str(provider).strip(), *batch)).fetchall()
+            for row in rows:
+                result[int(row[0])] = dict(zip(
+                    ("title", "poster_url", "kind", "aired_on", "updated_at"), row[1:]))
+        return result
+
     def shikimori_library_metadata(self, user_id):
         """Return public Shikimori card fields for this user's linked titles only."""
         user_id = self._positive_id(user_id, "user_id")

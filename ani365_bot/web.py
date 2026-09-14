@@ -1088,7 +1088,17 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
             rows = await anime.search(query.strip())
         except APIError as exc:
             _api_error(exc)
-        return {"items": rows}
+        metadata = store.external_anime_metadata_for_series(
+            "shikimori", [int(row["id"]) for row in rows if str(row.get("id", "")).isdigit()])
+        # Anime365 search intentionally requests only its stable catalogue
+        # fields.  A public Shikimori cover is used only when a confirmed global
+        # mapping already exists; searching must not create one API request per
+        # result or guess a title-to-poster association.
+        return {"items": [{
+            "series_id": int(row["id"]), "title": title(row),
+            "year": row.get("year"), "series_type": row.get("typeTitle") or row.get("type"),
+            "poster_url": metadata.get(int(row["id"]), {}).get("poster_url"),
+        } for row in rows if str(row.get("id", "")).isdigit()]}
 
     @app.get("/api/library/{series_id}")
     async def library_item(series_id: int, user_id=Depends(authenticated_user)):
