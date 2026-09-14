@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import secrets
 import tempfile
 import time
@@ -42,6 +43,7 @@ SHIKIMORI_IMPORT_FOREGROUND_METADATA_BATCH = 50
 SHIKIMORI_BACKGROUND_STATUSES = ("watching", "planned")
 SHIKIMORI_BACKGROUND_RETRY_SECONDS = 15 * 60
 SHIKIMORI_BACKGROUND_POLL_SECONDS = 60
+SHIKIMORI_ANIME_SLUG = re.compile(r"(?:^|/)([1-9][0-9]{0,8})-[a-z0-9-]+/?$", re.IGNORECASE)
 
 
 class WebAuthError(ValueError):
@@ -1084,8 +1086,14 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     async def catalog(query: str, user_id=Depends(authenticated_user)):
         if not query.strip() or len(query) > 200:
             raise HTTPException(422, "Введите название до 200 символов.")
+        query = query.strip()
+        # A copied Shikimori permalink starts with its stable anime ID.  Its
+        # slug is not an Anime365 search term, so use the exact MAL bridge
+        # instead of asking either provider to resolve a blocked page.
+        shikimori_slug = SHIKIMORI_ANIME_SLUG.search(query)
         try:
-            rows = await anime.search(query.strip())
+            rows = await anime.series_by_mal_id(shikimori_slug.group(1)) if shikimori_slug \
+                else await anime.search(query)
         except APIError as exc:
             _api_error(exc)
         metadata = store.external_anime_metadata_for_series(
@@ -1094,10 +1102,21 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         # fields.  A public Shikimori cover is used only when a confirmed global
         # mapping already exists; searching must not create one API request per
         # result or guess a title-to-poster association.
+        anime_origin = urlsplit(config.anime_url)
+
+        def anime365_poster(row):
+            value = row.get("posterUrlSmall") or row.get("posterUrl")
+            parts = urlsplit(value) if isinstance(value, str) else None
+            if not parts or parts.scheme != "https" or parts.hostname != anime_origin.hostname \
+                    or parts.username or parts.password or parts.query or parts.fragment \
+                    or not parts.path.startswith("/posters/"):
+                return None
+            return value
+
         return {"items": [{
             "series_id": int(row["id"]), "title": title(row),
             "year": row.get("year"), "series_type": row.get("typeTitle") or row.get("type"),
-            "poster_url": metadata.get(int(row["id"]), {}).get("poster_url"),
+            "poster_url": anime365_poster(row) or metadata.get(int(row["id"]), {}).get("poster_url"),
         } for row in rows if str(row.get("id", "")).isdigit()]}
 
     @app.get("/api/library/{series_id}")

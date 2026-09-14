@@ -201,7 +201,7 @@ class Anime365:
 
     async def search(self, query):
         rows = await self.listing("series", query=query,
-                                  fields="id,titles,type,typeTitle,year,myAnimeListId")
+                                  fields="id,titles,type,typeTitle,year,myAnimeListId,posterUrl,posterUrlSmall")
         needle = query.casefold()
 
         def rank(row):
@@ -224,7 +224,7 @@ class Anime365:
         if mal_id <= 0:
             return []
         rows = await self.listing("series", myAnimeListId=mal_id,
-                                  fields="id,titles,type,typeTitle,year,myAnimeListId")
+                                  fields="id,titles,type,typeTitle,year,myAnimeListId,posterUrl,posterUrlSmall")
         return [row for row in rows if str(row.get("myAnimeListId") or "") == str(mal_id)]
 
     async def episodes(self, series_id):

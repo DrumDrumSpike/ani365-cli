@@ -250,6 +250,23 @@ class WebTests(unittest.TestCase):
             "series_type": "TV", "poster_url": "https://shikimori.one/system/animes/preview/700.jpg",
         }])
 
+    def test_catalog_resolves_shikimori_permalink_by_exact_mal_id_with_anime365_poster(self):
+        self.anime.series_by_mal_id = AsyncMock(return_value=[{
+            "id": 39395, "titles": {"en": "Roll Over and Die"}, "year": 2026,
+            "typeTitle": "ТВ сериал", "myAnimeListId": 61587,
+            "posterUrlSmall": "https://smotret-anime.app/posters/39395.example.200x600.0.jpg",
+        }])
+        slug = "61587-omae-gotoki-ga-maou-ni-kateru-to-omouna-to-yuusha-party-wo-tsuihou-sareta-node-outo-de-kimama-ni-kurashitai"
+        result = self.client.get("/api/catalog?query=" + slug, headers=self.headers(42))
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json()["items"][0], {
+            "series_id": 39395, "title": "Roll Over and Die", "year": 2026,
+            "series_type": "ТВ сериал",
+            "poster_url": "https://smotret-anime.app/posters/39395.example.200x600.0.jpg",
+        })
+        self.anime.series_by_mal_id.assert_awaited_once_with("61587")
+        self.anime.search.assert_not_awaited()
+
     def test_background_shikimori_import_is_owner_bound_and_durable(self):
         self.store.save_external_account(42, "shikimori", "access", "refresh", time.time() + 3600, "123")
         shikimori = type("Shikimori", (), {})()
