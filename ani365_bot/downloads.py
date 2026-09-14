@@ -16,8 +16,10 @@ LOG = logging.getLogger(__name__)
 
 
 class DownloadManager:
-    def __init__(self, config, store, anime, media=None, telegram=None):
+    def __init__(self, config, store, anime, media=None, telegram=None, hentai=None, source_for_series=None):
         self.config, self.store, self.anime = config, store, anime
+        self.hentai = hentai
+        self.source_for_series = source_for_series or (lambda _series_id: (anime, config.anime_token))
         self.media = media or MediaProcessor(config.media_dir)
         self.telegram = telegram or Telegram(HTTPClient(), config.bot_token, config.telegram_url)
         self._semaphore = asyncio.Semaphore(config.download_workers)
@@ -69,11 +71,11 @@ class DownloadManager:
             if not job:
                 return
             try:
-                token = self.config.anime_token
+                source_client, token = self.source_for_series(job["series_id"])
                 if not token:
-                    raise APIError("Anime365 token is not configured on the server.")
-                source = await self.anime.media_source(job["translation_id"], job["quality"], token)
-                translations = await self.anime.translations(job["episode_id"])
+                    raise APIError("Источник видео не настроен на сервере.")
+                source = await source_client.media_source(job["translation_id"], job["quality"], token)
+                translations = await source_client.translations(job["episode_id"])
                 translation = next((row for row in translations
                                     if int(row.get("id", 0)) == job["translation_id"]), {})
                 kind, language = viewing_type(translation)

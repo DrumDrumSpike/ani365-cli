@@ -27,6 +27,8 @@ class Config:
     shikimori_redirect_uri: str = ""
     shikimori_import_interval: int = 12 * 60 * 60
     anime_token: str = ""
+    hentai_url: str = ""
+    hentai_token: str = ""
 
     @classmethod
     def from_env(cls):
@@ -45,6 +47,21 @@ class Config:
         anime_token = anime_token.strip()
         if not anime_token or len(anime_token) > 4096 or any(char.isspace() for char in anime_token):
             raise ConfigError("Set ANI365_TOKEN to one Anime365 access token in .env")
+        hentai_url = os.environ.get("HENTAI_BASE_URL", "").strip().rstrip("/")
+        hentai_token = os.environ.get("HENTAI_TOKEN") or os.environ.get("HENTAI_ACCESS_TOKEN", "")
+        hentai_token = hentai_token.strip()
+        if hentai_url and "://" not in hentai_url:
+            hentai_url = "https://" + hentai_url
+        if hentai_url:
+            parsed_hentai = urlsplit(hentai_url)
+            if (parsed_hentai.scheme != "https" or not parsed_hentai.hostname or parsed_hentai.username
+                    or parsed_hentai.query or parsed_hentai.fragment):
+                raise ConfigError("HENTAI_BASE_URL must be an HTTPS API base URL")
+            if parsed_hentai.path in ("", "/"):
+                hentai_url += "/api"
+        if bool(hentai_url) != bool(hentai_token) or (hentai_token and (
+                len(hentai_token) > 4096 or any(char.isspace() for char in hentai_token))):
+            raise ConfigError("Set both HENTAI_BASE_URL and HENTAI_TOKEN, or neither")
         telegram_url = os.environ.get("TELEGRAM_BOT_API_URL", cls.telegram_url).rstrip("/")
         telegram = urlsplit(telegram_url)
         if (telegram.scheme not in ("http", "https") or not telegram.hostname or telegram.username
@@ -101,4 +118,4 @@ class Config:
                    telegram_url, Path(os.environ.get("MEDIA_DIR", "/jobs")), watch_check_interval,
                    mini_app_url, cookie_secure in ("1", "true", "yes"), completion_threshold,
                    download_workers, download_ttl, shikimori_id, shikimori_secret, shikimori_redirect,
-                   shikimori_import_interval, anime_token)
+                   shikimori_import_interval, anime_token, hentai_url, hentai_token)

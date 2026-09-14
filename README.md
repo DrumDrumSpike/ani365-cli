@@ -83,6 +83,7 @@ sudo chmod 600 .env
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Данные приложения с `my.telegram.org` для локального Bot API |
 | `ANI365_BASE_URL` | Необязательно; по умолчанию `https://smotret-anime.app/api` |
 | `ANI365_TOKEN` | Общий токен Anime365 для бота, Mini App и offline jobs; обязателен |
+| `HENTAI_BASE_URL`, `HENTAI_TOKEN` | Необязательный отдельный Hentai365 API-источник только для Mini App. Можно указать `hentai365.ru`; адрес станет `https://hentai365.ru/api`. Нужен отдельный API-токен. |
 | `WATCH_CHECK_INTERVAL` | Необязательно; интервал проверки новых серий в секундах, по умолчанию `600` |
 | `WEB_DOMAIN`, `MINI_APP_URL` | HTTPS домен Caddy и публичный URL Mini App |
 | `DOWNLOAD_WORKERS`, `DOWNLOAD_TTL` | Максимум одновременных offline jobs (по умолчанию 2) и TTL готового browser-файла |
@@ -92,6 +93,12 @@ sudo chmod 600 .env
 положительным целым числом. `ANI365_TOKEN` хранится только в `.env` на сервере,
 не записывается в SQLite, не попадает в Mini App и не отправляется пользователям.
 Один общий токен используется только после проверки `OWNER_ID` или allowlist.
+
+Если Hentai365 настроен, в нижней навигации Mini App появляется отдельная вкладка.
+Её библиотека, прогресс, playback и offline jobs изолированы от Anime365 даже при
+совпадении ID тайтлов. У этого каталога намеренно нет Shikimori-привязки,
+Shikimori-синхронизации и уведомлений watcher: бот и watcher продолжают работать
+только с Anime365.
 
 После первого запуска доступ есть только у владельца. Чтобы добавить человека,
 владелец отправляет боту его числовой Telegram ID, например `/allow 123456789`.

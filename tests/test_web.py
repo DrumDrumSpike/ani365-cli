@@ -95,6 +95,54 @@ class WebTests(unittest.TestCase):
         self.anime.media_source.assert_awaited_with(800, 1080, "server-anime365-token")
         self.assertIsNone(self.store.token(7))
 
+    def test_hentai_catalog_is_separate_from_anime365_and_has_no_shikimori_routes(self):
+        hentai = type("Hentai", (), {})()
+        hentai.search = AsyncMock(return_value=[{
+            "id": 55, "titles": {"ru": "Отдельный каталог"}, "year": 2026,
+            "typeTitle": "TV", "posterUrlSmall": "https://hentai365.ru/posters/55.jpg",
+        }])
+        hentai.episodes = AsyncMock(return_value=[{
+            "id": 1700, "episodeFull": "1", "episodeInt": 1,
+        }])
+        hentai.translations = AsyncMock(return_value=[{"id": 1800, "type": "subRu"}])
+        hentai.available_qualities = AsyncMock(return_value=[720])
+        hentai.media_source = AsyncMock(return_value=MediaSource(
+            ("https://cdn.example/hentai.m3u8?signature=private",), None))
+        config = replace(self.config, hentai_url="https://hentai365.ru/api", hentai_token="hentai-secret")
+        app = create_app(config, self.store, self.anime, hentai)
+        client = TestClient(app)
+        try:
+            catalog = client.get("/api/hentai/catalog?query=test", headers=self.headers(42))
+            self.assertEqual(catalog.status_code, 200)
+            item = catalog.json()["items"][0]
+            self.assertEqual(item["series_id"], 1_000_000_000_055)
+            self.assertNotIn("hentai-secret", catalog.text)
+            added = client.post("/api/library", headers=self.headers(42), json={
+                "series_id": item["series_id"], "title": item["title"], "provider": "hentai365",
+            })
+            self.assertEqual(added.status_code, 200)
+            detail = client.get(f"/api/library/{item['series_id']}", headers=self.headers(42))
+            self.assertEqual(detail.status_code, 200)
+            self.assertEqual(detail.json()["item"]["provider"], "hentai365")
+            hentai.episodes.assert_awaited_with(55)
+            play = client.post("/api/play", headers=self.headers(42), json={
+                "series_id": item["series_id"], "episode_id": 1700, "translation_id": 1800, "quality": 720,
+            })
+            self.assertEqual(play.status_code, 200)
+            self.assertNotIn("hentai-secret", play.text)
+            hentai.media_source.assert_awaited_with(1800, 720, "hentai-secret")
+            self.assertEqual(
+                client.get(f"/api/library/{item['series_id']}/shikimori-rates", headers=self.headers(42)).status_code,
+                404,
+            )
+            self.assertEqual(
+                client.patch(f"/api/library/{item['series_id']}/notifications", headers=self.headers(42),
+                             json={"enabled": True, "mode": "any"}).status_code,
+                422,
+            )
+        finally:
+            client.close()
+
     def test_cross_user_library_and_stream_ticket_are_not_visible(self):
         self.store.add_allowed_user(7, owner_id=42)
         self.store.add_allowed_user(8, owner_id=42)

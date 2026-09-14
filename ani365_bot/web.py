@@ -49,6 +49,10 @@ SHIKIMORI_BACKGROUND_RETRY_SECONDS = 15 * 60
 SHIKIMORI_BACKGROUND_POLL_SECONDS = 60
 SHIKIMORI_ANIME_SLUG = re.compile(r"(?:^|/)([1-9][0-9]{0,8})-[a-z0-9-]+/?$", re.IGNORECASE)
 HLS_URI_ATTRIBUTE = re.compile(r"(?P<prefix>\bURI=)(?P<quote>[\"'])(?P<value>.*?)(?P=quote)")
+# SQLite and the legacy bot identify a title by one positive integer.  Keep the
+# optional Hentai365 catalogue in a disjoint range without rewriting existing
+# user data or allowing same-numbered titles from two services to collide.
+HENTAI_SERIES_OFFSET = 1_000_000_000_000
 
 
 class WebAuthError(ValueError):
@@ -237,6 +241,7 @@ class AddLibraryRequest(BaseModel):
     # Anime365 returns a numeric year while old bot callers may send text.
     year: str | int | None = None
     series_type: str | None = Field(default=None, max_length=80)
+    provider: str = Field(default="anime365", pattern="^(anime365|hentai365)$")
 
 
 class NotificationRequest(BaseModel):
@@ -430,7 +435,7 @@ async def _shikimori_candidates(anime_client, shikimori_client, rate):
         external, rows, fallback_title=rate["title"], fallback_mal_id=rate["external_anime_id"])
 
 
-def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
+def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transport=None):
     """Create an app with injectable dependencies for isolated integration tests."""
     if config is None:
         from .config import Config
@@ -441,17 +446,50 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         store = Store(config.data_dir)
     if anime is None:
         anime = Anime365(HTTPClient(), config.anime_url)
+    if hentai is None and config.hentai_url:
+        hentai = Anime365(HTTPClient(), config.hentai_url)
 
     app = FastAPI(title="ani365 Mini App", docs_url=None, redoc_url=None)
     app.state.store = store
     app.state.anime = anime
+    app.state.hentai = hentai
     app.state.tickets = EphemeralTickets()
     app.state.subtitle_tickets = EphemeralTickets()
     app.state.limiter = RateLimiter()
     app.state.sessions = SessionSigner(config.bot_token)
     app.state.config = config
     app.state.download_tickets = EphemeralTickets()
-    app.state.downloads = DownloadManager(config, store, anime)
+    def source_for_series(series_id):
+        value = int(series_id)
+        if value >= HENTAI_SERIES_OFFSET:
+            if hentai is None or not config.hentai_token:
+                raise APIError("Hentai365 не настроен на сервере.")
+            return hentai, config.hentai_token, value - HENTAI_SERIES_OFFSET, "hentai365"
+        return anime, config.anime_token, value, "anime365"
+
+    def source_client(series_id):
+        client, token, _upstream_id, _provider = source_for_series(series_id)
+        return client, token
+
+    def is_hentai_series(series_id):
+        return int(series_id) >= HENTAI_SERIES_OFFSET
+
+    def public_series_id(provider, upstream_id):
+        value = int(upstream_id)
+        return HENTAI_SERIES_OFFSET + value if provider == "hentai365" else value
+
+    def source_item(item):
+        provider = "hentai365" if is_hentai_series(item["series_id"]) else "anime365"
+        return {**item, "provider": provider,
+                "upstream_series_id": int(item["series_id"]) - HENTAI_SERIES_OFFSET
+                if provider == "hentai365" else int(item["series_id"])}
+
+    def require_shikimori_series(series_id):
+        if is_hentai_series(series_id):
+            raise HTTPException(404, "Shikimori недоступен для этого каталога.")
+
+    app.state.downloads = DownloadManager(config, store, anime, hentai=hentai,
+                                          source_for_series=source_client)
     app.state.proxy_transport = proxy_transport
     app.state.shikimori = Shikimori(config.shikimori_client_id, config.shikimori_client_secret,
                                     config.shikimori_redirect_uri)
@@ -633,6 +671,8 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     async def sync_shikimori_progress(user_id, series_id, episode_number, *, series_complete=False):
         """Best-effort completion sync; playback is never blocked by Shikimori."""
         try:
+            if is_hentai_series(series_id):
+                return
             watched = number(episode_number)
             if watched <= 0 or watched != int(watched):
                 return
@@ -1068,8 +1108,8 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     async def library(user_id=Depends(authenticated_user)):
         await backfill_shikimori_metadata(user_id)
         metadata = store.shikimori_library_metadata(user_id)
-        items = [{**item, **metadata.get(item["series_id"], {})}
-                 for item in store.list_watchlist(user_id)]
+        items = [{**source_item(item), **({} if is_hentai_series(item["series_id"])
+                 else metadata.get(item["series_id"], {}))} for item in store.list_watchlist(user_id)]
         # A local title without Shikimori status remains "watching", preserving
         # the old bot workflow. Once a status exists, Shikimori is the source
         # of truth for its library section.
@@ -1080,8 +1120,8 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
             groups[status if status in SHIKIMORI_STATUSES else "watching"].append(item)
         active = groups["watching"] + groups["rewatching"]
         active_ids = {item["series_id"] for item in active}
-        recent = [{**item, **metadata.get(item["series_id"], {})}
-                  for item in store.recent_playback(user_id)
+        recent = [{**source_item(item), **({} if is_hentai_series(item["series_id"])
+                  else metadata.get(item["series_id"], {}))} for item in store.recent_playback(user_id)
                   if item["series_id"] in active_ids]
         new_episodes = [item for item in active
                         if item.get("last_watched_episode_number") is not None
@@ -1092,6 +1132,12 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
 
     @app.post("/api/library")
     async def add_library(payload: AddLibraryRequest, user_id=Depends(authenticated_user)):
+        if payload.provider == "hentai365":
+            if not is_hentai_series(payload.series_id):
+                raise HTTPException(422, "Некорректный источник каталога.")
+            source_for_series(payload.series_id)
+        elif is_hentai_series(payload.series_id):
+            raise HTTPException(422, "Некорректный источник каталога.")
         return store.add_watchlist(user_id, payload.series_id, payload.title, payload.year,
                                    payload.series_type)
 
@@ -1104,6 +1150,8 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     @app.patch("/api/library/{series_id}/notifications")
     async def update_library_notifications(series_id: int, payload: NotificationRequest,
                                            user_id=Depends(authenticated_user)):
+        if is_hentai_series(series_id):
+            raise HTTPException(422, "Уведомления недоступны для Hentai365.")
         watch = store.get_watchlist(user_id, series_id)
         if watch is None:
             raise HTTPException(404, "Anime is not in your library.")
@@ -1126,7 +1174,8 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         if not store.has_watchlist(user_id, series_id):
             raise HTTPException(404, "Anime is not in your library.")
         try:
-            rows = await anime.episodes(series_id)
+            source, _token, upstream_series_id, _provider = source_for_series(series_id)
+            rows = await source.episodes(upstream_series_id)
         except APIError as exc:
             _api_error(exc)
         episode = next((row for row in rows if int(row.get("id", 0)) == episode_id), None)
@@ -1136,7 +1185,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         result = store.record_playback_progress(
             user_id, series_id, episode_id, 0, 0, episode_number, ended=True,
             completion_threshold=config.playback_completion_threshold)
-        if result and result["completed"]:
+        if result and result["completed"] and not is_hentai_series(series_id):
             asyncio.create_task(sync_shikimori_progress(
                 user_id, series_id, episode_number,
                 series_complete=bool(rows) and int(rows[-1].get("id", 0) or 0) == episode_id))
@@ -1145,6 +1194,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     @app.patch("/api/library/{series_id}/shikimori-status")
     async def update_shikimori_status(series_id: int, payload: ShikimoriStatusRequest,
                                       user_id=Depends(authenticated_user)):
+        require_shikimori_series(series_id)
         if not store.has_watchlist(user_id, series_id):
             raise HTTPException(404, "Anime is not in your library.")
         rate = store.external_rate_for_series(user_id, "shikimori", series_id)
@@ -1162,6 +1212,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     @app.get("/api/library/{series_id}/shikimori-rates")
     async def shikimori_rates_for_library_item(series_id: int, query: str = Query(default="", max_length=200),
                                                 user_id=Depends(authenticated_user)):
+        require_shikimori_series(series_id)
         if not store.has_watchlist(user_id, series_id):
             raise HTTPException(404, "Anime is not in your library.")
         rates = store.search_unlinked_external_user_rates(user_id, "shikimori", query)
@@ -1170,6 +1221,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     @app.post("/api/library/{series_id}/shikimori-link")
     async def link_shikimori_library_item(series_id: int, payload: ShikimoriLibraryLinkRequest,
                                           user_id=Depends(authenticated_user)):
+        require_shikimori_series(series_id)
         if not store.has_watchlist(user_id, series_id):
             raise HTTPException(404, "Anime is not in your library.")
         rate = store.external_user_rate(user_id, "shikimori", payload.external_rate_id)
@@ -1189,6 +1241,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
 
     @app.post("/api/library/{series_id}/shikimori-metadata")
     async def refresh_shikimori_library_metadata(series_id: int, user_id=Depends(authenticated_user)):
+        require_shikimori_series(series_id)
         if not store.has_watchlist(user_id, series_id):
             raise HTTPException(404, "Anime is not in your library.")
         rate = store.external_rate_for_series(user_id, "shikimori", series_id)
@@ -1238,14 +1291,43 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
             "poster_url": anime365_poster(row) or metadata.get(int(row["id"]), {}).get("poster_url"),
         } for row in rows if str(row.get("id", "")).isdigit()]}
 
+    @app.get("/api/hentai/catalog")
+    async def hentai_catalog(query: str, user_id=Depends(authenticated_user)):
+        if not query.strip() or len(query) > 200:
+            raise HTTPException(422, "Введите название до 200 символов.")
+        if hentai is None or not config.hentai_token:
+            raise HTTPException(409, "Hentai365 не настроен на сервере.")
+        try:
+            rows = await hentai.search(query.strip())
+        except APIError as exc:
+            _api_error(exc)
+        origin = urlsplit(config.hentai_url)
+
+        def poster(row):
+            value = row.get("posterUrlSmall") or row.get("posterUrl")
+            parts = urlsplit(value) if isinstance(value, str) else None
+            if not parts or parts.scheme != "https" or parts.hostname != origin.hostname \
+                    or parts.username or parts.password or parts.query or parts.fragment \
+                    or not parts.path.startswith("/posters/"):
+                return None
+            return value
+
+        return {"items": [{
+            "series_id": public_series_id("hentai365", row["id"]), "title": title(row),
+            "year": row.get("year"), "series_type": row.get("typeTitle") or row.get("type"),
+            "poster_url": poster(row), "provider": "hentai365",
+        } for row in rows if str(row.get("id", "")).isdigit()]}
+
     @app.get("/api/library/{series_id}")
     async def library_item(series_id: int, user_id=Depends(authenticated_user)):
         item = store.get_watchlist(user_id, series_id)
         if item is None:
             raise HTTPException(404, "Anime is not in your library.")
-        item = {**item, **store.shikimori_library_metadata(user_id).get(series_id, {})}
+        item = {**source_item(item), **({} if is_hentai_series(series_id)
+                else store.shikimori_library_metadata(user_id).get(series_id, {}))}
         try:
-            episodes = await anime.episodes(series_id)
+            source, _token, upstream_series_id, _provider = source_for_series(series_id)
+            episodes = await source.episodes(upstream_series_id)
         except APIError as exc:
             _api_error(exc)
         progress = store.playback_progress(user_id, series_id)
@@ -1258,7 +1340,8 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         if not store.has_watchlist(user_id, series_id):
             raise HTTPException(404, "Anime is not in your library.")
         try:
-            rows = await anime.episodes(series_id)
+            source, _token, upstream_series_id, _provider = source_for_series(series_id)
+            rows = await source.episodes(upstream_series_id)
         except APIError as exc:
             _api_error(exc)
         item = store.get_watchlist(user_id, series_id)
@@ -1266,18 +1349,22 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
                                              item.get("last_watched_episode_number")) for row in rows]}
 
     @app.get("/api/episodes/{episode_id}/translations")
-    async def translations(episode_id: int, user_id=Depends(authenticated_user)):
+    async def translations(episode_id: int, series_id: int | None = Query(default=None, gt=0),
+                           user_id=Depends(authenticated_user)):
         try:
-            rows = await anime.translations(episode_id)
+            source, _token, _upstream_series_id, _provider = source_for_series(series_id or 1)
+            rows = await source.translations(episode_id)
         except APIError as exc:
             _api_error(exc)
         return {"groups": [{"kind": group.kind, "language": group.language, "label": group.label,
                              "items": group.translations} for group in group_translations(rows)]}
 
     @app.get("/api/translations/{translation_id}/qualities")
-    async def available_qualities(translation_id: int, user_id=Depends(authenticated_user)):
+    async def available_qualities(translation_id: int, series_id: int | None = Query(default=None, gt=0),
+                                  user_id=Depends(authenticated_user)):
         try:
-            values = await anime.available_qualities(translation_id, require_token(user_id))
+            source, token, _upstream_series_id, _provider = source_for_series(series_id or 1)
+            values = await source.available_qualities(translation_id, token)
         except APIError as exc:
             _api_error(exc)
         return {"items": values}
@@ -1288,14 +1375,15 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         if not store.has_watchlist(user_id, payload.series_id):
             raise HTTPException(404, "Anime is not in your library.")
         try:
-            episodes = await anime.episodes(payload.series_id)
+            source_client, token, upstream_series_id, _provider = source_for_series(payload.series_id)
+            episodes = await source_client.episodes(upstream_series_id)
             episode = next((row for row in episodes if int(row.get("id", 0)) == payload.episode_id), None)
             if episode is None:
                 raise HTTPException(422, "Выбранная серия больше недоступна.")
-            translations = await anime.translations(payload.episode_id)
+            translations = await source_client.translations(payload.episode_id)
             if not any(int(row.get("id", 0)) == payload.translation_id for row in translations):
                 raise HTTPException(422, "Выбранный перевод больше недоступен.")
-            source = await anime.media_source(payload.translation_id, payload.quality, require_token(user_id))
+            source = await source_client.media_source(payload.translation_id, payload.quality, token)
         except APIError as exc:
             _api_error(exc)
         proxy_ticket = app.state.tickets.create(user_id, source.urls[0])
@@ -1318,7 +1406,8 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         if not store.has_watchlist(user_id, payload.series_id):
             raise HTTPException(404, "Anime is not in your library.")
         try:
-            rows = await anime.episodes(payload.series_id)
+            source, _token, upstream_series_id, _provider = source_for_series(payload.series_id)
+            rows = await source.episodes(upstream_series_id)
         except APIError as exc:
             _api_error(exc)
         episode = next((row for row in rows if int(row.get("id", 0)) == payload.episode_id), None)
@@ -1328,7 +1417,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
             user_id, payload.series_id, payload.episode_id, payload.position_seconds,
             payload.duration_seconds, str(episode.get("episodeFull") or episode.get("episodeInt") or "?"),
             ended=payload.ended, completion_threshold=config.playback_completion_threshold)
-        if result and result["completed"]:
+        if result and result["completed"] and not is_hentai_series(payload.series_id):
             # Keep local playback durable even when Shikimori is temporarily
             # unavailable. The task catches all expected remote failures.
             asyncio.create_task(sync_shikimori_progress(
@@ -1343,9 +1432,10 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         if not store.has_watchlist(user_id, payload.series_id):
             raise HTTPException(404, "Anime is not in your library.")
         try:
-            episodes = await anime.episodes(payload.series_id)
+            source, _token, upstream_series_id, _provider = source_for_series(payload.series_id)
+            episodes = await source.episodes(upstream_series_id)
             episode = next((row for row in episodes if int(row.get("id", 0)) == payload.episode_id), None)
-            translations = await anime.translations(payload.episode_id) if episode else ()
+            translations = await source.translations(payload.episode_id) if episode else ()
         except APIError as exc:
             _api_error(exc)
         if episode is None or not any(int(row.get("id", 0)) == payload.translation_id for row in translations):
@@ -1373,9 +1463,10 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         if watch is None:
             raise HTTPException(404, "Anime is not in your library.")
         try:
-            episodes = await anime.episodes(payload.series_id)
+            source, _token, upstream_series_id, _provider = source_for_series(payload.series_id)
+            episodes = await source.episodes(upstream_series_id)
             anchor = next((row for row in episodes if int(row.get("id", 0)) == payload.anchor_episode_id), None)
-            anchor_rows = await anime.translations(payload.anchor_episode_id) if anchor else ()
+            anchor_rows = await source.translations(payload.anchor_episode_id) if anchor else ()
         except APIError as exc:
             _api_error(exc)
         selected = next((row for row in anchor_rows if int(row.get("id", 0)) == payload.translation_id), None)
@@ -1395,7 +1486,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         for episode in chosen:
             try:
                 rows = anchor_rows if int(episode["id"]) == payload.anchor_episode_id \
-                    else await anime.translations(int(episode["id"]))
+                    else await source.translations(int(episode["id"]))
             except APIError:
                 skipped.append(str(episode.get("episodeFull") or episode.get("episodeInt") or "?"))
                 continue

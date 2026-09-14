@@ -164,6 +164,18 @@ class ShapeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Config.from_env()
 
+    def test_optional_hentai_source_normalizes_a_bare_domain_and_requires_its_token(self):
+        values = {"BOT_TOKEN": "fake:token", "OWNER_ID": "42", "ANI365_TOKEN": "shared-token",
+                  "HENTAI_BASE_URL": "hentai365.ru", "HENTAI_TOKEN": "separate-token"}
+        with patch.dict(os.environ, values, clear=True):
+            cfg = Config.from_env()
+        self.assertEqual(cfg.hentai_url, "https://hentai365.ru/api")
+        self.assertEqual(cfg.hentai_token, "separate-token")
+        values.pop("HENTAI_TOKEN")
+        with patch.dict(os.environ, values, clear=True):
+            with self.assertRaises(ValueError):
+                Config.from_env()
+
     def test_invalid_config_rejected_without_echoing_secret(self):
         with patch.dict(os.environ, {"BOT_TOKEN": "secret", "OWNER_ID": "42"}, clear=True):
             with self.assertRaises(ValueError) as raised:
