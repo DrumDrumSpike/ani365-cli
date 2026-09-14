@@ -20,6 +20,9 @@ button.secondary { background: var(--tg-theme-secondary-bg-color, #243241); colo
 .episodes { display: flex; flex-wrap: wrap; gap: 7px; }.episodes button { min-width: 42px; }
 input, select { width: 100%; padding: 12px; border-radius: 10px; border: 0; margin: 5px 0; }
 input[type="checkbox"] { width: auto; padding: 0; margin-right: 6px; }
+.inline-actions { display: flex; gap: 6px; align-items: center; margin: 8px 0; }
+.inline-actions input { flex: 1; min-width: 0; margin: 0; }
+.inline-actions .action { flex: 0 0 auto; margin: 0; }
 video { width: 100%; max-height: 75vh; background: #000; border-radius: 12px; }
 .error { color: #ff8888; white-space: pre-wrap; } .back { margin-top: 12px; }
 @media (max-width: 360px) { .title-header { display: block; }.detail-poster { display: block; margin: 0 auto 12px; } }

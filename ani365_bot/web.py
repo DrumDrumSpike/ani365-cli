@@ -435,6 +435,41 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
             episode = exact[-1]
             store.update_progress(user_id, series_id, episode)
 
+    async def shikimori_exact_mal_series(user_id, rate):
+        """Resolve only an Anime365 result that confirms the imported MAL ID.
+
+        A Shikimori title can be censored or have no public poster.  That must
+        not prevent a person's own rate from being linked: the stable provider
+        ID is enough when Anime365 returns the same MAL ID.  No Shikimori page,
+        title search, or poster request is needed here.
+        """
+        try:
+            rows = await anime.series_by_mal_id(rate["external_anime_id"])
+        except APIError:
+            LOG.info("Shikimori MAL lookup unavailable (user=%s, rate=%s)",
+                     user_id, rate["external_rate_id"])
+            return None
+        if len(rows) != 1:
+            return None
+        selected = rows[0]
+        if str(selected.get("myAnimeListId") or "") != rate["external_anime_id"]:
+            LOG.warning("Anime365 MAL lookup returned an unverified result (series=%s)",
+                        selected.get("id"))
+            return None
+        return selected
+
+    async def link_shikimori_exact_mal(user_id, rate, selected):
+        """Persist one verified bridge and restore it to this user's library."""
+        series_id = int(selected["id"])
+        store.add_watchlist(user_id, series_id, title(selected), selected.get("year"),
+                            selected.get("typeTitle") or selected.get("type"))
+        store.save_external_id(series_id, "shikimori", rate["external_anime_id"])
+        store.save_external_id(series_id, "mal", str(selected["myAnimeListId"]))
+        bound = store.link_external_user_rate(user_id, "shikimori", rate["external_rate_id"], series_id)
+        if bound:
+            await merge_shikimori_progress(user_id, series_id, bound)
+        return bound
+
     async def cache_shikimori_metadata(rate, *, force=False):
         """Cache one public record globally; credentials and user rates stay private."""
         cached = store.external_anime_metadata("shikimori", rate["external_anime_id"])
@@ -702,9 +737,17 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
                 "policy": "progress=max(local, shikimori); Shikimori status is primary"}
 
     @app.get("/api/shikimori/imports")
-    async def shikimori_imports(linked: bool | None = None, offset: int = Query(default=0, ge=0),
+    async def shikimori_imports(linked: bool | None = None, query: str | None = Query(default=None, max_length=500),
+                                offset: int = Query(default=0, ge=0),
                                 limit: int = Query(default=SHIKIMORI_IMPORT_PAGE_SIZE, ge=1, le=100),
                                 user_id=Depends(authenticated_user)):
+        if query is not None and query.strip():
+            if linked is not False:
+                raise HTTPException(422, "Поиск доступен только среди непривязанных тайтлов.")
+            items = store.search_unlinked_external_user_rates(user_id, "shikimori", query, limit=limit)
+            return {"items": items, "total": len(items), "next_offset": None,
+                    "query": query.strip(),
+                    "policy": "progress=max(local, shikimori); Shikimori status is primary"}
         total = store.external_user_rate_count(user_id, "shikimori", linked=linked)
         items = store.external_user_rates(user_id, "shikimori", linked=linked, offset=offset, limit=limit)
         next_offset = offset + len(items)
@@ -722,31 +765,36 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
 
         async def lookup(rate):
             async with semaphore:
-                try:
-                    rows = await anime.series_by_mal_id(rate["external_anime_id"])
-                except APIError:
-                    LOG.info("Shikimori MAL lookup unavailable (user=%s, rate=%s)",
-                             user_id, rate["external_rate_id"])
-                    return rate, None
-            return rate, rows[0] if len(rows) == 1 else None
+                return rate, await shikimori_exact_mal_series(user_id, rate)
 
         matches = await asyncio.gather(*(lookup(rate) for rate in rates))
         linked = 0
         for rate, selected in matches:
             if selected is None:
                 continue
-            series_id = int(selected["id"])
-            store.add_watchlist(user_id, series_id, title(selected), selected.get("year"),
-                                selected.get("typeTitle") or selected.get("type"))
-            store.save_external_id(series_id, "shikimori", rate["external_anime_id"])
-            store.save_external_id(series_id, "mal", str(selected["myAnimeListId"]))
-            bound = store.link_external_user_rate(user_id, "shikimori", rate["external_rate_id"], series_id)
+            bound = await link_shikimori_exact_mal(user_id, rate, selected)
             if bound:
-                await merge_shikimori_progress(user_id, series_id, bound)
                 linked += 1
         remaining = store.external_user_rate_count(user_id, "shikimori", linked=False)
         return {"checked": len(rates), "linked": linked, "remaining": remaining,
                 "batch_limited": remaining > 0 and len(rates) == SHIKIMORI_AUTO_LINK_BATCH}
+
+    @app.post("/api/shikimori/imports/{rate_id}/auto-link")
+    async def shikimori_exact_auto_link(rate_id: str, user_id=Depends(authenticated_user)):
+        """Link one imported item by its verified MAL ID without title matching."""
+        app.state.limiter.check(user_id, "shikimori-exact-auto-link", 20)
+        rate = store.external_user_rate(user_id, "shikimori", rate_id)
+        if not rate:
+            raise HTTPException(404, "Импортированный тайтл не найден.")
+        if rate["anime365_series_id"] is not None:
+            return {"item": rate, "verified_mal": True, "already_linked": True}
+        selected = await shikimori_exact_mal_series(user_id, rate)
+        if selected is None:
+            raise HTTPException(404, "Anime365 не подтвердил точное совпадение MAL ID.")
+        linked = await link_shikimori_exact_mal(user_id, rate, selected)
+        if not linked:
+            raise HTTPException(409, "Не удалось сохранить привязку.")
+        return {"item": linked, "verified_mal": True, "already_linked": False}
 
     @app.get("/api/shikimori/imports/{rate_id}/candidates")
     async def shikimori_candidates(rate_id: str, user_id=Depends(authenticated_user)):

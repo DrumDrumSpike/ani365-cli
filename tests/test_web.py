@@ -327,6 +327,32 @@ class WebTests(unittest.TestCase):
         self.assertEqual(result.json()["unmatched"][0]["title"], "Нормальное название")
         self.assertEqual(shikimori.animes.await_args.args[0], ["701"])
 
+    def test_censored_shikimori_title_can_link_by_exact_mal_id_without_page_or_poster(self):
+        """A censored Shikimori card remains importable through the stable ID bridge."""
+        self.store.import_external_rates(42, "shikimori", [{
+            "external_rate_id": "61587-rate", "external_anime_id": "61587",
+            "status": "planned", "episodes": 0,
+            "title": "Неужели ты думаешь, что сможешь победить Короля Демонов?",
+        }])
+        self.anime.series_by_mal_id = AsyncMock(return_value=[{
+            "id": 39395, "titles": {"ru": "Неужели ты думаешь, что сможешь победить Короля Демонов?"},
+            "year": 2026, "typeTitle": "TV", "myAnimeListId": 61587,
+        }])
+
+        found = self.client.get("/api/shikimori/imports?linked=false&query=61587",
+                                headers=self.headers(42))
+        self.assertEqual(found.status_code, 200)
+        self.assertEqual(found.json()["items"][0]["external_rate_id"], "61587-rate")
+
+        linked = self.client.post("/api/shikimori/imports/61587-rate/auto-link",
+                                  headers=self.headers(42))
+        self.assertEqual(linked.status_code, 200)
+        self.assertTrue(linked.json()["verified_mal"])
+        self.assertTrue(self.store.has_watchlist(42, 39395))
+        self.assertEqual(self.store.external_user_rate(42, "shikimori", "61587-rate")
+                         ["anime365_series_id"], 39395)
+        self.anime.search.assert_not_awaited()
+
     def test_large_shikimori_import_replies_after_first_metadata_batch(self):
         self.store.save_external_account(42, "shikimori", "shiki-access", "shiki-refresh",
                                          time.time() + 3600, "123")

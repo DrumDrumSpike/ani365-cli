@@ -84,7 +84,7 @@
   function renderShikimoriImport(data) {
     const unmatched = data.unmatched || [];
     const total = Number(data.unmatched_total ?? unmatched.length);
-    root.innerHTML = `<h1>Shikimori импортирован</h1><p class="meta">Импортировано: ${esc(data.imported)} · привязано: ${esc(data.linked)}</p>${data.metadata_refreshing ? '<p class="meta">Остальные названия и обложки догружаются в фоне. Обновите экран через несколько секунд.</p>' : ''}${unmatched.length ? `<button class="action" id="auto-link">Автопривязать по MAL ID</button><p class="meta">Осталось привязать: ${esc(total)}. Автоматически добавляются только точные совпадения ID.</p><h2>Нужно выбрать Anime365</h2>${unmatched.map(item => `<section class="panel"><strong>${esc(item.title)}</strong><p class="meta">${esc(shikimoriStatus(item.status))} · ${esc(item.episodes)} сер.</p><button class="action secondary" data-match="${esc(item.external_rate_id)}">Подобрать</button></section>`).join('')}${data.next_offset !== null && data.next_offset !== undefined ? '<button class="action secondary" id="more-unmatched">Показать ещё</button>' : ''}` : '<p class="empty">Все импортированные тайтлы привязаны.</p>'}<button class="action secondary back">К настройкам</button>`;
+    root.innerHTML = `<h1>Shikimori импортирован</h1><p class="meta">Импортировано: ${esc(data.imported)} · привязано: ${esc(data.linked)}</p>${data.metadata_refreshing ? '<p class="meta">Остальные названия и обложки догружаются в фоне. Обновите экран через несколько секунд.</p>' : ''}${unmatched.length ? `<button class="action" id="auto-link">Автопривязать по MAL ID</button><p class="meta">Осталось привязать: ${esc(total)}. Автоматически добавляются только точные совпадения ID.</p><div class="inline-actions"><input id="unmatched-query" value="${esc(data.query || '')}" placeholder="Название или Shikimori ID"><button class="action secondary" id="find-unmatched">Найти</button></div><h2>Нужно выбрать Anime365</h2>${unmatched.map(item => `<section class="panel"><strong>${esc(item.title)}</strong><p class="meta">${esc(shikimoriStatus(item.status))} · ${esc(item.episodes)} сер.</p><button class="action secondary" data-direct-link="${esc(item.external_rate_id)}">Проверить MAL ID</button><button class="action secondary" data-match="${esc(item.external_rate_id)}">Подобрать</button></section>`).join('')}${data.next_offset !== null && data.next_offset !== undefined ? '<button class="action secondary" id="more-unmatched">Показать ещё</button>' : ''}` : '<p class="empty">Все импортированные тайтлы привязаны.</p>'}<button class="action secondary back">К настройкам</button>`;
     root.querySelector('.back').onclick = settings;
     const autoLink = root.querySelector('#auto-link');
     if (autoLink) autoLink.onclick = async () => { try {
@@ -95,6 +95,21 @@
                              unmatched:current.items, unmatched_total:current.total,
                              next_offset:current.next_offset});
     } catch(error) { fail(error); } };
+    const findUnmatched = root.querySelector('#find-unmatched');
+    if (findUnmatched) findUnmatched.onclick = async () => { try {
+      const query = root.querySelector('#unmatched-query').value.trim();
+      const found = await api('/api/shikimori/imports?linked=false&query=' + encodeURIComponent(query));
+      renderShikimoriImport({...data, unmatched:found.items, unmatched_total:found.total,
+                             next_offset:null, query:found.query || query});
+    } catch(error) { fail(error); } };
+    root.querySelectorAll('[data-direct-link]').forEach(button => button.onclick = async () => { try {
+      button.disabled = true; button.textContent = 'Проверяем MAL ID…';
+      await api('/api/shikimori/imports/' + encodeURIComponent(button.dataset.directLink) + '/auto-link', {method:'POST'});
+      const current = await api('/api/shikimori/imports?linked=false');
+      renderShikimoriImport({imported:data.imported, linked:data.linked + 1,
+                             unmatched:current.items, unmatched_total:current.total,
+                             next_offset:current.next_offset});
+    } catch(error) { fail(error); } });
     const more = root.querySelector('#more-unmatched');
     if (more) more.onclick = async () => { try {
       const next = await api('/api/shikimori/imports?linked=false&offset=' + encodeURIComponent(data.next_offset));
