@@ -175,6 +175,22 @@ class StoreTests(unittest.TestCase):
         self.store.update_external_rate_episodes(1, "shikimori", "101", 8)
         self.assertEqual(self.store.external_rate_for_series(1, "shikimori", 10)["episodes"], 8)
 
+    def test_shikimori_public_metadata_is_returned_only_for_linked_owner_titles(self):
+        self.store.add_watchlist(1, 10, "Local")
+        self.store.add_watchlist(2, 10, "Other")
+        self.store.save_external_id(10, "shikimori", "501")
+        self.store.import_external_rates(1, "shikimori", [{
+            "external_rate_id": "101", "external_anime_id": "501", "status": "watching",
+            "episodes": 2, "title": "Imported title",
+        }])
+        self.store.link_external_user_rate(1, "shikimori", "101", 10)
+        self.store.save_external_anime_metadata(
+            "shikimori", "501", poster_url="https://shikimori.one/system/animes/preview/501.jpg",
+            kind="tv", aired_on="2024-01-01")
+        self.assertEqual(self.store.shikimori_library_metadata(1)[10]["poster_url"],
+                         "https://shikimori.one/system/animes/preview/501.jpg")
+        self.assertEqual(self.store.shikimori_library_metadata(2), {})
+
     def test_finished_downloads_can_be_hidden_without_losing_history_or_title(self):
         self.store.add_watchlist(1, 10, "Saved title")
         self.store.add_watchlist(2, 10, "Other user's title")

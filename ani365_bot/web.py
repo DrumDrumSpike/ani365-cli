@@ -15,7 +15,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlsplit
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
@@ -258,6 +258,21 @@ def _shikimori_title(rate, anime=None):
                or rate.get("title") or f"Shikimori #{rate.get('target_id') or target.get('id') or '?'}")[:500]
 
 
+def _shikimori_public_metadata(anime):
+    """Keep only an allow-listed public Shikimori poster URL and small labels."""
+    if not isinstance(anime, dict):
+        return {}
+    image = anime.get("image") if isinstance(anime.get("image"), dict) else {}
+    value = image.get("preview")
+    parts = urlsplit(value) if isinstance(value, str) else None
+    poster = None
+    if parts and not parts.scheme and not parts.netloc and parts.path.startswith("/system/animes/") \
+            and ".." not in parts.path:
+        poster = "https://shikimori.one" + value
+    return {"poster_url": poster, "shikimori_kind": str(anime.get("kind") or "")[:32] or None,
+            "shikimori_aired_on": str(anime.get("aired_on") or "")[:32] or None}
+
+
 def _shikimori_rates(rows, statuses, anime_by_id=None):
     """Keep only safe, normalized Anime rates from an untrusted API payload."""
     result, seen = [], set()
@@ -279,7 +294,8 @@ def _shikimori_rates(rows, statuses, anime_by_id=None):
         anime = (anime_by_id or {}).get(anime_id)
         result.append({"external_rate_id": rate_id, "external_anime_id": anime_id,
                        "status": str(row["status"]), "episodes": episodes,
-                       "title": _shikimori_title(row, anime)})
+                       "title": _shikimori_title(row, anime),
+                       **_shikimori_public_metadata(anime)})
         seen.add(rate_id)
     return result
 
@@ -293,7 +309,6 @@ async def _shikimori_rates_with_titles(shikimori_client, rows, statuses):
         return preliminary
     details = await shikimori_client.animes(missing)
     return _shikimori_rates(rows, statuses, details)
-
 
 async def _shikimori_candidates(anime_client, shikimori_client, rate):
     """Search every stable Shikimori title and retain only safe candidate data."""
@@ -507,6 +522,13 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         except ShikimoriError as exc:
             raise HTTPException(502, str(exc)) from None
         store.import_external_rates(user_id, "shikimori", rates)
+        for rate in rates:
+            metadata = {key: rate.get(key) for key in
+                        ("poster_url", "shikimori_kind", "shikimori_aired_on")}
+            if any(metadata.values()):
+                store.save_external_anime_metadata(
+                    "shikimori", rate["external_anime_id"], poster_url=metadata["poster_url"],
+                    kind=metadata["shikimori_kind"], aired_on=metadata["shikimori_aired_on"])
         linked = []
         for rate in store.external_user_rates(user_id, "shikimori", linked=True):
             # A previous explicit mapping or an exact provider-ID mapping can
@@ -601,6 +623,11 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         if not verified and not payload.confirm_manual:
             raise HTTPException(409, "Подтвердите ручную привязку: MAL ID не совпал.")
         series_id = int(selected["id"])
+        metadata = _shikimori_public_metadata(_external)
+        if any(metadata.values()):
+            store.save_external_anime_metadata(
+                "shikimori", rate["external_anime_id"], poster_url=metadata["poster_url"],
+                kind=metadata["shikimori_kind"], aired_on=metadata["shikimori_aired_on"])
         store.add_watchlist(user_id, series_id, title(selected), selected.get("year"),
                             selected.get("typeTitle") or selected.get("type"))
         store.save_external_id(series_id, "shikimori", rate["external_anime_id"])
@@ -612,7 +639,12 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
 
     @app.get("/api/library")
     async def library(user_id=Depends(authenticated_user)):
-        return {"items": store.list_watchlist(user_id), "continue": store.recent_playback(user_id)}
+        metadata = store.shikimori_library_metadata(user_id)
+        items = [{**item, **metadata.get(item["series_id"], {})}
+                 for item in store.list_watchlist(user_id)]
+        recent = [{**item, **metadata.get(item["series_id"], {})}
+                  for item in store.recent_playback(user_id)]
+        return {"items": items, "continue": recent}
 
     @app.post("/api/library")
     async def add_library(payload: AddLibraryRequest, user_id=Depends(authenticated_user)):
@@ -657,6 +689,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         item = store.get_watchlist(user_id, series_id)
         if item is None:
             raise HTTPException(404, "Anime is not in your library.")
+        item = {**item, **store.shikimori_library_metadata(user_id).get(series_id, {})}
         try:
             episodes = await anime.episodes(series_id)
         except APIError as exc:

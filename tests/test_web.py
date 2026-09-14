@@ -305,6 +305,21 @@ class WebTests(unittest.TestCase):
         self.assertEqual(result.json()["unmatched"][0]["title"], "Нормальное название")
         self.assertEqual(shikimori.animes.await_args.args[0], ["701"])
 
+    def test_library_exposes_only_owner_linked_shikimori_poster(self):
+        self.store.add_watchlist(42, 55, "Title")
+        self.store.save_external_id(55, "shikimori", "700")
+        self.store.import_external_rates(42, "shikimori", [{
+            "external_rate_id": "50", "external_anime_id": "700", "status": "watching",
+            "episodes": 2, "title": "Title",
+        }])
+        self.store.link_external_user_rate(42, "shikimori", "50", 55)
+        self.store.save_external_anime_metadata(
+            "shikimori", "700", poster_url="https://shikimori.one/system/animes/preview/700.jpg")
+        self.assertEqual(self.client.get("/api/library", headers=self.headers(42)).json()["items"][0]["poster_url"],
+                         "https://shikimori.one/system/animes/preview/700.jpg")
+        self.store.add_allowed_user(7, owner_id=42)
+        self.assertNotIn("poster_url", self.client.get("/api/library", headers=self.headers(7)).json()["items"])
+
 
 if __name__ == "__main__":
     unittest.main()

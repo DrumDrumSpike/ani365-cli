@@ -6,7 +6,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class StateError(ValueError):
@@ -105,6 +105,11 @@ class Store:
             with self.db:
                 self._create_v7()
                 self.db.execute("PRAGMA user_version = 7")
+            version = 7
+        if version < 8:
+            with self.db:
+                self._create_v8()
+                self.db.execute("PRAGMA user_version = 8")
 
     def _create_v1(self):
         """Initial schema, kept idempotent for pre-versioned installations."""
@@ -343,6 +348,20 @@ class Store:
             ON download_jobs(user_id, hidden_at, created_at DESC)
         """)
 
+    def _create_v8(self):
+        """Cache non-secret public metadata for already imported external anime."""
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS external_anime_metadata (
+                provider TEXT NOT NULL,
+                external_id TEXT NOT NULL,
+                poster_url TEXT,
+                kind TEXT,
+                aired_on TEXT,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(provider, external_id)
+            )
+        """)
+
     @staticmethod
     def _now(value):
         return time.time() if value is None else float(value)
@@ -510,6 +529,38 @@ class Store:
             WHERE provider=? AND external_id=?
         """, (str(provider).strip(), str(external_id).strip())).fetchone()
         return int(row[0]) if row else None
+
+    def save_external_anime_metadata(self, provider, external_id, *, poster_url=None, kind=None,
+                                     aired_on=None, now=None):
+        provider, external_id = str(provider).strip(), str(external_id).strip()
+        if not provider or not external_id:
+            raise ValueError("External provider and id are required")
+        with self.db:
+            self.db.execute("""
+                INSERT INTO external_anime_metadata(
+                    provider, external_id, poster_url, kind, aired_on, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(provider, external_id) DO UPDATE SET
+                    poster_url=excluded.poster_url, kind=excluded.kind, aired_on=excluded.aired_on,
+                    updated_at=excluded.updated_at
+            """, (provider, external_id, poster_url, kind, aired_on, self._now(now)))
+
+    def shikimori_library_metadata(self, user_id):
+        """Return public Shikimori card fields for this user's linked titles only."""
+        user_id = self._positive_id(user_id, "user_id")
+        rows = self.db.execute("""
+            SELECT rates.anime365_series_id, rates.status, rates.episodes,
+                   metadata.poster_url, metadata.kind, metadata.aired_on
+            FROM external_user_rates AS rates
+            LEFT JOIN external_anime_metadata AS metadata
+              ON metadata.provider=rates.provider AND metadata.external_id=rates.external_anime_id
+            WHERE rates.user_id=? AND rates.provider='shikimori'
+              AND rates.anime365_series_id IS NOT NULL
+        """, (user_id,)).fetchall()
+        return {int(row[0]): {"shikimori_status": row[1], "shikimori_episodes": row[2],
+                               "poster_url": row[3], "shikimori_kind": row[4],
+                               "shikimori_aired_on": row[5]}
+                for row in rows}
 
     @staticmethod
     def _external_rate(row):
