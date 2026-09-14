@@ -342,6 +342,15 @@ class WebTests(unittest.TestCase):
         self.store.add_allowed_user(7, owner_id=42)
         self.assertNotIn("poster_url", self.client.get("/api/library", headers=self.headers(7)).json()["items"])
 
+    def test_library_new_episodes_uses_cached_watcher_data_for_owner_only(self):
+        self.store.add_watchlist(42, 55, "Title")
+        self.store.update_progress(42, 55, {"id": 700, "episodeFull": "7"})
+        self.store.update_available(42, 55, {"id": 701, "episodeFull": "8"})
+        payload = self.client.get("/api/library", headers=self.headers(42)).json()
+        self.assertEqual([item["series_id"] for item in payload["new_episodes"]], [55])
+        self.store.add_allowed_user(7, owner_id=42)
+        self.assertEqual(self.client.get("/api/library", headers=self.headers(7)).json()["new_episodes"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
