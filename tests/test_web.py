@@ -349,6 +349,10 @@ variants/720.m3u8?signature=private
     def test_mini_app_shell_and_assets_are_not_cached_between_deploys(self):
         self.assertEqual(self.client.get("/").headers["cache-control"], "no-store, max-age=0")
         self.assertEqual(self.client.get("/assets/app.js").headers["cache-control"], "no-store, max-age=0")
+        hls = self.client.get("/assets/hls-1.7.3.min.js")
+        self.assertEqual(hls.status_code, 200)
+        self.assertTrue(hls.headers["content-type"].startswith(("text/javascript", "application/javascript")))
+        self.assertEqual(hls.headers["cache-control"], "public, max-age=31536000, immutable")
         hero = self.client.get("/assets/anime-night.webp")
         self.assertEqual(hero.status_code, 200)
         self.assertTrue(hero.headers["content-type"].startswith("image/webp"))

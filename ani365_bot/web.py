@@ -781,11 +781,13 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
 
     @app.get("/assets/{asset_name}")
     async def assets(asset_name: str):
-        allowed = {"app.js", "app.css", "anime-night.webp"}
+        allowed = {"app.js", "app.css", "anime-night.webp", "hls-1.7.3.min.js"}
         if asset_name not in allowed:
             raise HTTPException(404, "Not found")
         return FileResponse(Path(__file__).with_name("web_static") / asset_name,
-                            headers={"Cache-Control": "no-store, max-age=0"})
+                            headers={"Cache-Control": "public, max-age=31536000, immutable"}
+                            if asset_name == "hls-1.7.3.min.js"
+                            else {"Cache-Control": "no-store, max-age=0"})
 
     @app.get("/api/me")
     async def me(response: Response, user_id=Depends(authenticated_user)):
