@@ -178,6 +178,16 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.external_user_rate(1, "shikimori", "101")["status"], "completed")
         self.assertFalse(self.store.update_external_rate_status(2, "shikimori", "101", "watching"))
 
+    def test_external_rates_are_paginated_without_cross_user_count(self):
+        rates = [{"external_rate_id": str(index), "external_anime_id": str(100 + index),
+                  "status": "planned", "episodes": 0, "title": f"Title {index}"}
+                 for index in range(3)]
+        self.store.import_external_rates(1, "shikimori", rates)
+        self.assertEqual(self.store.external_user_rate_count(1, "shikimori", linked=False), 3)
+        self.assertEqual([row["external_rate_id"]
+                          for row in self.store.external_user_rates(1, "shikimori", limit=2, offset=2)], ["2"])
+        self.assertEqual(self.store.external_user_rate_count(2, "shikimori", linked=False), 0)
+
     def test_shikimori_public_metadata_is_returned_only_for_linked_owner_titles(self):
         self.store.add_watchlist(1, 10, "Local")
         self.store.add_watchlist(2, 10, "Other")

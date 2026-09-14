@@ -287,6 +287,7 @@ class WebTests(unittest.TestCase):
                                     json={"statuses": ["watching"]})
         self.assertEqual(imported.status_code, 200)
         self.assertEqual(imported.json()["unmatched"][0]["external_rate_id"], "50")
+        self.assertEqual(imported.json()["unmatched_total"], 1)
         automatically_linked = self.client.post("/api/shikimori/imports/auto-link", headers=self.headers(42))
         self.assertEqual(automatically_linked.json()["linked"], 1)
         self.assertEqual(automatically_linked.json()["remaining"], 0)
