@@ -127,7 +127,10 @@ class WebTests(unittest.TestCase):
             self.assertEqual(detail.json()["item"]["provider"], "hentai365")
             self.assertEqual(detail.json()["item"]["poster_url"], "https://h365-art.org/posters/55.jpg")
             library = client.get("/api/library", headers=self.headers(42))
-            self.assertEqual(library.json()["items"][0]["poster_url"], "https://h365-art.org/posters/55.jpg")
+            self.assertEqual(library.json()["items"], [])
+            self.assertEqual(library.json()["continue"], [])
+            self.assertEqual(library.json()["hentai_items"][0]["poster_url"],
+                             "https://h365-art.org/posters/55.jpg")
             hentai.episodes.assert_awaited_with(55)
             play = client.post("/api/play", headers=self.headers(42), json={
                 "series_id": item["series_id"], "episode_id": 1700, "translation_id": 1800, "quality": 720,

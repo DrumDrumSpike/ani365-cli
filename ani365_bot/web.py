@@ -1122,10 +1122,12 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
         hentai_metadata = store.external_anime_metadata_many(
             "hentai365", [int(item["series_id"]) - HENTAI_SERIES_OFFSET for item in watched
                           if is_hentai_series(item["series_id"])])
-        items = [{**source_item(item), **(
+        all_items = [{**source_item(item), **(
                  {"poster_url": hentai_metadata.get(str(int(item["series_id"]) - HENTAI_SERIES_OFFSET), {}).get("poster_url")}
                  if is_hentai_series(item["series_id"])
                  else metadata.get(item["series_id"], {}))} for item in watched]
+        hentai_items = [item for item in all_items if item["provider"] == "hentai365"]
+        items = [item for item in all_items if item["provider"] == "anime365"]
         # A local title without Shikimori status remains "watching", preserving
         # the old bot workflow. Once a status exists, Shikimori is the source
         # of truth for its library section.
@@ -1146,7 +1148,7 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
                         and number(item.get("last_available_episode_number"))
                         > number(item.get("last_watched_episode_number"))]
         return {"items": active, "continue": recent, "new_episodes": new_episodes,
-                "groups": groups}
+                "groups": groups, "hentai_items": hentai_items}
 
     @app.post("/api/library")
     async def add_library(payload: AddLibraryRequest, user_id=Depends(authenticated_user)):

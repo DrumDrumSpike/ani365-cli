@@ -68,6 +68,7 @@
       state.view = 'library';
       const data = await api('/api/library');
       const groups = [['watching', 'Смотрю'], ['rewatching', 'Пересматриваю'], ['planned', 'Запланировано'], ['on_hold', 'Отложено'], ['dropped', 'Брошено'], ['completed', 'Просмотрено']];
+      const hentaiItems = data.hentai_items || [];
       root.innerHTML = '<section class="page-heading"><p class="eyebrow">Личная коллекция</p><div><h1>Моё аниме</h1><span class="count-badge">' + esc(data.items?.length || 0) + ' тайтлов</span></div></section><label class="search-field"><span>⌕</span><input id="library-search" placeholder="Поиск по названию"></label><div id="library-groups"></div><button class="action secondary back">Назад</button>';
       useBack(); root.querySelector('.back').onclick = home;
       const search = root.querySelector('#library-search');
@@ -76,7 +77,7 @@
         const sections = groups.map(([status, label]) => {
           const items = (data.groups?.[status] || []).filter(item => !query || String(item.title || '').toLocaleLowerCase().includes(query));
           return items.length ? `<details class="library-group" open><summary>${label} · ${items.length}</summary>${cards(items)}</details>` : '';
-        }).join('');
+        }).join('') + (() => { const items = hentaiItems.filter(item => !query || String(item.title || '').toLocaleLowerCase().includes(query)); return items.length ? `<details class="library-group"><summary>Hentai365 · ${items.length}</summary>${cards(items)}</details>` : ''; })();
         root.querySelector('#library-groups').innerHTML = sections || '<p class="empty">Ничего не найдено.</p>';
         root.querySelectorAll('[data-series]').forEach(button => button.onclick = () => details(Number(button.dataset.series)));
       };
