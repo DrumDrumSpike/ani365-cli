@@ -395,9 +395,11 @@ variants/720.m3u8?signature=private
     def test_shikimori_sync_setting_is_private_and_persistent(self):
         self.store.save_external_account(42, "shikimori", "access", "refresh", time.time() + 3600, "123")
         result = self.client.patch("/api/shikimori/settings", headers=self.headers(42),
-                                   json={"sync_enabled": False})
-        self.assertEqual(result.json(), {"sync_enabled": False})
+                                   json={"sync_enabled": False, "auto_complete": True})
+        self.assertFalse(result.json()["sync_enabled"])
+        self.assertTrue(result.json()["auto_complete"])
         self.assertFalse(self.store.external_account_status(42, "shikimori")["sync_enabled"])
+        self.assertTrue(self.store.external_account_status(42, "shikimori")["auto_complete"])
         self.assertEqual(self.client.patch("/api/shikimori/settings", headers=self.headers(99),
                                            json={"sync_enabled": True}).status_code, 403)
 
@@ -421,6 +423,48 @@ variants/720.m3u8?signature=private
         self.store.add_allowed_user(7, owner_id=42)
         self.assertEqual(self.client.patch("/api/library/55/shikimori-status", headers=self.headers(7),
                                            json={"status": "watching"}).status_code, 404)
+
+    def test_auto_complete_marks_only_the_last_episode_completed_in_shikimori(self):
+        self.store.add_watchlist(42, 55, "Title")
+        self.store.save_external_account(42, "shikimori", "access", "refresh", time.time() + 3600, "123")
+        self.store.set_external_auto_complete(42, "shikimori", True)
+        self.store.import_external_rates(42, "shikimori", [{
+            "external_rate_id": "50", "external_anime_id": "700", "status": "watching",
+            "episodes": 0, "title": "Title",
+        }])
+        self.store.link_external_user_rate(42, "shikimori", "50", 55)
+        self.anime.episodes = AsyncMock(return_value=[
+            {"id": 700, "episodeFull": "1", "episodeInt": 1},
+            {"id": 701, "episodeFull": "2", "episodeInt": 2},
+        ])
+        shikimori = type("Shikimori", (), {})()
+        shikimori.update_user_rate = AsyncMock()
+        self.app.state.shikimori = shikimori
+        first = self.client.post("/api/progress", headers=self.headers(42), json={
+            "series_id": 55, "episode_id": 700, "position_seconds": 100,
+            "duration_seconds": 100, "ended": True,
+        })
+        self.assertTrue(first.json()["completed"])
+        for _ in range(20):
+            if shikimori.update_user_rate.await_count:
+                break
+            time.sleep(0.01)
+        self.assertEqual(shikimori.update_user_rate.await_args.kwargs, {"episodes": 1})
+        self.assertEqual(self.store.external_user_rate(42, "shikimori", "50")["status"], "watching")
+        shikimori.update_user_rate.reset_mock()
+        result = self.client.post("/api/progress", headers=self.headers(42), json={
+            "series_id": 55, "episode_id": 701, "position_seconds": 100,
+            "duration_seconds": 100, "ended": True,
+        })
+        self.assertTrue(result.json()["completed"])
+        for _ in range(20):
+            if shikimori.update_user_rate.await_count:
+                break
+            time.sleep(0.01)
+        self.assertEqual(shikimori.update_user_rate.await_args.args, ("access", "50"))
+        self.assertEqual(shikimori.update_user_rate.await_args.kwargs,
+                         {"episodes": 2, "status": "completed"})
+        self.assertEqual(self.store.external_user_rate(42, "shikimori", "50")["status"], "completed")
 
     def test_shikimori_import_uses_anime_id_mal_bridge_and_alternative_title_searches(self):
         self.store.save_external_account(42, "shikimori", "shiki-access", "shiki-refresh",

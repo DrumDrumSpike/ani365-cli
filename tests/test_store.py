@@ -83,6 +83,22 @@ class StoreTests(unittest.TestCase):
         self.assertIn("title", columns)
         self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
 
+    def test_v10_migration_adds_auto_complete_without_changing_sync(self):
+        self.store.save_external_account(1, "shikimori", "access", "refresh", 100, "42")
+        self.store.set_external_sync_enabled(1, "shikimori", False)
+        self.store.close()
+        db_path = self.directory / "bot.sqlite3"
+        db = sqlite3.connect(db_path)
+        db.execute("ALTER TABLE external_accounts DROP COLUMN auto_complete")
+        db.execute("PRAGMA user_version = 10")
+        db.commit()
+        db.close()
+        self.store = Store(self.directory)
+        account = self.store.external_account_status(1, "shikimori")
+        self.assertFalse(account["sync_enabled"])
+        self.assertFalse(account["auto_complete"])
+        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+
     def test_owner_is_always_allowed_and_cannot_be_revoked(self):
         owner = 42
         self.assertTrue(self.store.is_allowed(owner, owner))
@@ -159,9 +175,13 @@ class StoreTests(unittest.TestCase):
         self.store.save_external_account(1, "shikimori", "access-secret", "refresh-secret", 100, "42")
         self.assertEqual(self.store.external_account_status(1, "shikimori"), {
             "connected": True, "external_user_id": "42", "expires_at": 100.0, "sync_enabled": True,
+            "auto_complete": False,
         })
         self.assertTrue(self.store.set_external_sync_enabled(1, "shikimori", False))
         self.assertFalse(self.store.external_account_status(1, "shikimori")["sync_enabled"])
+        self.assertTrue(self.store.set_external_auto_complete(1, "shikimori", True))
+        self.assertTrue(self.store.external_account_status(1, "shikimori")["auto_complete"])
+        self.assertFalse(self.store.set_external_auto_complete(2, "shikimori", True))
         self.assertFalse(self.store.set_external_sync_enabled(2, "shikimori", True))
         self.assertIsNone(self.store.external_account(2, "shikimori"))
         self.store.create_oauth_state(1, "shikimori", "state-which-is-not-a-token", now=1)

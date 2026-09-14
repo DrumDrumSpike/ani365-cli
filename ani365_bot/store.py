@@ -7,7 +7,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 class StateError(ValueError):
@@ -121,6 +121,11 @@ class Store:
             with self.db:
                 self._create_v10()
                 self.db.execute("PRAGMA user_version = 10")
+            version = 10
+        if version < 11:
+            with self.db:
+                self._create_v11()
+                self.db.execute("PRAGMA user_version = 11")
 
     def _create_v1(self):
         """Initial schema, kept idempotent for pre-versioned installations."""
@@ -399,6 +404,15 @@ class Store:
             ON external_import_state(provider, next_run_at)
         """)
 
+    def _create_v11(self):
+        """Keep the user's explicit Shikimori completion preference."""
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(external_accounts)")}
+        if "auto_complete" not in columns:
+            self.db.execute("""
+                ALTER TABLE external_accounts ADD COLUMN auto_complete INTEGER NOT NULL DEFAULT 0
+                    CHECK(auto_complete IN (0, 1))
+            """)
+
     @staticmethod
     def _now(value):
         return time.time() if value is None else float(value)
@@ -481,7 +495,7 @@ class Store:
     def external_account(self, user_id, provider):
         user_id = self._positive_id(user_id, "user_id")
         row = self.db.execute("""
-            SELECT access_token, refresh_token, expires_at, external_user_id, sync_enabled
+            SELECT access_token, refresh_token, expires_at, external_user_id, sync_enabled, auto_complete
             FROM external_accounts WHERE user_id=? AND provider=?
         """, (user_id, str(provider))).fetchone()
         if not row:
@@ -489,7 +503,8 @@ class Store:
         try:
             return {"access_token": self.cipher.decrypt(row[0]).decode(),
                     "refresh_token": self.cipher.decrypt(row[1]).decode(), "expires_at": row[2],
-                    "external_user_id": row[3], "sync_enabled": bool(row[4])}
+                    "external_user_id": row[3], "sync_enabled": bool(row[4]),
+                    "auto_complete": bool(row[5])}
         except InvalidToken:
             raise StateError("Cannot decrypt external account; restore matching token.key") from None
 
@@ -498,7 +513,8 @@ class Store:
         if not account:
             return {"connected": False}
         return {"connected": True, "external_user_id": account["external_user_id"],
-                "expires_at": account["expires_at"], "sync_enabled": account["sync_enabled"]}
+                "expires_at": account["expires_at"], "sync_enabled": account["sync_enabled"],
+                "auto_complete": account["auto_complete"]}
 
     def save_external_account(self, user_id, provider, access_token, refresh_token, expires_at,
                               external_user_id=None):
@@ -522,6 +538,15 @@ class Store:
         with self.db:
             cursor = self.db.execute("""
                 UPDATE external_accounts SET sync_enabled=? WHERE user_id=? AND provider=?
+            """, (int(bool(enabled)), user_id, str(provider)))
+        return bool(cursor.rowcount)
+
+    def set_external_auto_complete(self, user_id, provider, enabled):
+        """Change only the owner's completion preference."""
+        user_id = self._positive_id(user_id, "user_id")
+        with self.db:
+            cursor = self.db.execute("""
+                UPDATE external_accounts SET auto_complete=? WHERE user_id=? AND provider=?
             """, (int(bool(enabled)), user_id, str(provider)))
         return bool(cursor.rowcount)
 

@@ -293,7 +293,8 @@ class ShikimoriLibraryLinkRequest(BaseModel):
 
 
 class ShikimoriSettingsRequest(BaseModel):
-    sync_enabled: bool
+    sync_enabled: bool | None = None
+    auto_complete: bool | None = None
 
 
 class ShikimoriStatusRequest(BaseModel):
@@ -629,7 +630,7 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
             else:
                 retry_after[item["external_anime_id"]] = now + SHIKIMORI_METADATA_RETRY_SECONDS
 
-    async def sync_shikimori_progress(user_id, series_id, episode_number):
+    async def sync_shikimori_progress(user_id, series_id, episode_number, *, series_complete=False):
         """Best-effort completion sync; playback is never blocked by Shikimori."""
         try:
             watched = number(episode_number)
@@ -637,12 +638,25 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
                 return
             rate = store.external_rate_for_series(user_id, "shikimori", series_id)
             account = store.external_account(user_id, "shikimori")
-            if not rate or not account or not account["sync_enabled"] or watched <= rate["episodes"]:
+            if not rate or not account or not account["sync_enabled"]:
+                return
+            update_progress = watched > rate["episodes"]
+            update_status = bool(series_complete and account["auto_complete"]
+                                 and rate.get("status") != "completed")
+            if not update_progress and not update_status:
                 return
             account = await shikimori_account(user_id)
+            values = {}
+            if update_progress:
+                values["episodes"] = int(watched)
+            if update_status:
+                values["status"] = "completed"
             await app.state.shikimori.update_user_rate(account["access_token"], rate["external_rate_id"],
-                                                       episodes=int(watched))
-            store.update_external_rate_episodes(user_id, "shikimori", rate["external_rate_id"], int(watched))
+                                                       **values)
+            if update_progress:
+                store.update_external_rate_episodes(user_id, "shikimori", rate["external_rate_id"], int(watched))
+            if update_status:
+                store.update_external_rate_status(user_id, "shikimori", rate["external_rate_id"], "completed")
         except (ShikimoriError, HTTPException, ValueError):
             LOG.warning("Shikimori progress sync failed (user=%s series=%s)", user_id, series_id)
 
@@ -812,9 +826,15 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
     @app.patch("/api/shikimori/settings")
     async def shikimori_settings(payload: ShikimoriSettingsRequest,
                                  user_id=Depends(authenticated_user)):
-        if not store.set_external_sync_enabled(user_id, "shikimori", payload.sync_enabled):
+        if payload.sync_enabled is None and payload.auto_complete is None:
+            raise HTTPException(422, "Выберите настройку Shikimori.")
+        if not store.external_account_status(user_id, "shikimori")["connected"]:
             raise HTTPException(409, "Сначала подключите Shikimori.")
-        return {"sync_enabled": payload.sync_enabled}
+        if payload.sync_enabled is not None:
+            store.set_external_sync_enabled(user_id, "shikimori", payload.sync_enabled)
+        if payload.auto_complete is not None:
+            store.set_external_auto_complete(user_id, "shikimori", payload.auto_complete)
+        return store.external_account_status(user_id, "shikimori")
 
     @app.post("/api/shikimori/connect")
     async def shikimori_connect(user_id=Depends(authenticated_user)):
@@ -1289,7 +1309,8 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
             # unavailable. The task catches all expected remote failures.
             asyncio.create_task(sync_shikimori_progress(
                 user_id, payload.series_id,
-                str(episode.get("episodeFull") or episode.get("episodeInt") or "?")))
+                str(episode.get("episodeFull") or episode.get("episodeInt") or "?"),
+                series_complete=bool(rows) and int(rows[-1].get("id", 0) or 0) == payload.episode_id))
         return result
 
     @app.post("/api/downloads")
