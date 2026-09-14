@@ -351,6 +351,22 @@ class WebTests(unittest.TestCase):
         self.store.add_allowed_user(7, owner_id=42)
         self.assertEqual(self.client.get("/api/library", headers=self.headers(7)).json()["new_episodes"], [])
 
+    def test_completed_shikimori_titles_are_in_library_but_not_active_sections(self):
+        self.store.add_watchlist(42, 55, "Finished")
+        self.store.update_progress(42, 55, {"id": 700, "episodeFull": "7"})
+        self.store.update_available(42, 55, {"id": 701, "episodeFull": "8"})
+        self.store.record_playback_progress(42, 55, {"id": 700, "episodeFull": "7"}, 20, 100)
+        self.store.import_external_rates(42, "shikimori", [{
+            "external_rate_id": "50", "external_anime_id": "700", "status": "completed",
+            "episodes": 7, "title": "Finished",
+        }])
+        self.store.link_external_user_rate(42, "shikimori", "50", 55)
+        payload = self.client.get("/api/library", headers=self.headers(42)).json()
+        self.assertEqual(payload["items"], [])
+        self.assertEqual(payload["continue"], [])
+        self.assertEqual(payload["new_episodes"], [])
+        self.assertEqual([item["series_id"] for item in payload["groups"]["completed"]], [55])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -657,13 +657,25 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         metadata = store.shikimori_library_metadata(user_id)
         items = [{**item, **metadata.get(item["series_id"], {})}
                  for item in store.list_watchlist(user_id)]
+        # A local title without Shikimori status remains "watching", preserving
+        # the old bot workflow. Once a status exists, Shikimori is the source
+        # of truth for its library section.
+        groups = {status: [] for status in SHIKIMORI_STATUSES}
+        groups["watching"] = []
+        for item in items:
+            status = item.get("shikimori_status")
+            groups[status if status in SHIKIMORI_STATUSES else "watching"].append(item)
+        active = groups["watching"] + groups["rewatching"]
+        active_ids = {item["series_id"] for item in active}
         recent = [{**item, **metadata.get(item["series_id"], {})}
-                  for item in store.recent_playback(user_id)]
-        new_episodes = [item for item in items
+                  for item in store.recent_playback(user_id)
+                  if item["series_id"] in active_ids]
+        new_episodes = [item for item in active
                         if item.get("last_watched_episode_number") is not None
                         and number(item.get("last_available_episode_number"))
                         > number(item.get("last_watched_episode_number"))]
-        return {"items": items, "continue": recent, "new_episodes": new_episodes}
+        return {"items": active, "continue": recent, "new_episodes": new_episodes,
+                "groups": groups}
 
     @app.post("/api/library")
     async def add_library(payload: AddLibraryRequest, user_id=Depends(authenticated_user)):

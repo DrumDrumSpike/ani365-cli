@@ -38,8 +38,9 @@
     try {
       telegram?.BackButton.hide();
       const data = await api('/api/library'); state.library = data.items;
-      root.innerHTML = `<h1>Anime365</h1><button class="action" id="search">Найти аниме</button><button class="action secondary" id="downloads">Загрузки</button><button class="action secondary" id="settings">Настройки</button><h2>Продолжить просмотр</h2>${cards(data.continue, true)}${data.new_episodes?.length ? `<h2>Новые серии</h2>${cards(data.new_episodes)}` : ''}<h2>Смотрю</h2>${cards(data.items)}`;
+      root.innerHTML = `<h1>Anime365</h1><button class="action" id="search">Найти аниме</button><button class="action secondary" id="library">Библиотека</button><button class="action secondary" id="downloads">Загрузки</button><button class="action secondary" id="settings">Настройки</button><h2>Продолжить просмотр</h2>${cards(data.continue, true)}${data.new_episodes?.length ? `<h2>Новые серии</h2>${cards(data.new_episodes)}` : ''}<h2>Смотрю</h2>${cards(data.items)}`;
       document.getElementById('search').onclick = search;
+      document.getElementById('library').onclick = library;
       document.getElementById('downloads').onclick = downloads;
       document.getElementById('settings').onclick = settings;
       root.querySelectorAll('[data-series]').forEach(button => button.onclick = () => details(Number(button.dataset.series)));
@@ -50,6 +51,17 @@
     return `<section class="grid">${items.map(item => `<article class="card"><button data-series="${item.series_id}">${item.poster_url ? `<img class="poster" src="${esc(item.poster_url)}" alt="" loading="lazy">` : ''}<strong>${esc(item.title)}</strong><div class="meta">${esc(item.last_watched_episode_number || 0)} / ${esc(item.last_available_episode_number || '?')}${resume && item.playback ? ` · ${Math.floor(item.playback.position_seconds / 60)}:${String(Math.floor(item.playback.position_seconds % 60)).padStart(2,'0')}` : ''}${item.shikimori_status ? ` · ${esc(shikimoriStatus(item.shikimori_status))}` : ''}</div></button></article>`).join('')}</section>`;
   }
   const shikimoriStatus = status => ({planned:'Запланировано',watching:'Смотрю',rewatching:'Пересматриваю',completed:'Просмотрено',on_hold:'Отложено',dropped:'Брошено'}[status] || status);
+  async function library() {
+    try {
+      const data = await api('/api/library');
+      const sections = [['watching', 'Смотрю'], ['rewatching', 'Пересматриваю'], ['planned', 'Запланировано'], ['on_hold', 'Отложено'], ['dropped', 'Брошено'], ['completed', 'Просмотрено']]
+        .filter(([status]) => data.groups?.[status]?.length)
+        .map(([status, label]) => `<h2>${label}</h2>${cards(data.groups[status])}`).join('');
+      root.innerHTML = `<h1>Библиотека</h1>${sections || '<p class="empty">Пока здесь пусто.</p>'}<button class="action secondary back">Назад</button>`;
+      useBack(); root.querySelector('.back').onclick = home;
+      root.querySelectorAll('[data-series]').forEach(button => button.onclick = () => details(Number(button.dataset.series)));
+    } catch (error) { fail(error); }
+  }
   async function search() {
     root.innerHTML = '<h1>Каталог</h1><input id="query" placeholder="Название аниме"><button class="action" id="go">Найти</button><section id="results"></section><button class="action secondary back">Назад</button>';
     useBack(); root.querySelector('.back').onclick = back;
