@@ -1118,6 +1118,30 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
             raise HTTPException(404, "Anime is not in your library.")
         return item
 
+    @app.post("/api/library/{series_id}/episodes/{episode_id}/watched")
+    async def mark_library_episode_watched(series_id: int, episode_id: int,
+                                           user_id=Depends(authenticated_user)):
+        """Manually complete an episode when a player event was missed."""
+        app.state.limiter.check(user_id, "manual-progress", 30)
+        if not store.has_watchlist(user_id, series_id):
+            raise HTTPException(404, "Anime is not in your library.")
+        try:
+            rows = await anime.episodes(series_id)
+        except APIError as exc:
+            _api_error(exc)
+        episode = next((row for row in rows if int(row.get("id", 0)) == episode_id), None)
+        if episode is None:
+            raise HTTPException(422, "Выбранная серия больше недоступна.")
+        episode_number = str(episode.get("episodeFull") or episode.get("episodeInt") or "?")
+        result = store.record_playback_progress(
+            user_id, series_id, episode_id, 0, 0, episode_number, ended=True,
+            completion_threshold=config.playback_completion_threshold)
+        if result and result["completed"]:
+            asyncio.create_task(sync_shikimori_progress(
+                user_id, series_id, episode_number,
+                series_complete=bool(rows) and int(rows[-1].get("id", 0) or 0) == episode_id))
+        return result
+
     @app.patch("/api/library/{series_id}/shikimori-status")
     async def update_shikimori_status(series_id: int, payload: ShikimoriStatusRequest,
                                       user_id=Depends(authenticated_user)):

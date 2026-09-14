@@ -159,6 +159,22 @@ class WebTests(unittest.TestCase):
         self.assertEqual(result.status_code, 200)
         self.assertTrue(result.json()["completed"])
 
+    def test_manual_episode_completion_updates_only_its_owner_progress(self):
+        self.store.add_watchlist(42, 55, "Title")
+        self.anime.episodes = AsyncMock(return_value=[
+            {"id": 700, "episodeFull": "7", "episodeInt": 7},
+            {"id": 701, "episodeFull": "8", "episodeInt": 8},
+        ])
+        result = self.client.post("/api/library/55/episodes/701/watched", headers=self.headers(42))
+        self.assertEqual(result.status_code, 200)
+        self.assertTrue(result.json()["completed"])
+        self.assertEqual(self.store.get_watchlist(42, 55)["last_watched_episode_id"], 701)
+        self.store.add_allowed_user(7, owner_id=42)
+        self.assertEqual(
+            self.client.post("/api/library/55/episodes/701/watched", headers=self.headers(7)).status_code,
+            404,
+        )
+
     def test_travel_queues_only_unwatched_episodes_with_matching_translation_profile(self):
         self.store.add_watchlist(42, 55, "Title")
         self.store.update_progress(42, 55, {"id": 700, "episodeFull": "7"})
