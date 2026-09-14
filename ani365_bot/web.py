@@ -16,7 +16,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, urljoin, urlsplit
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
@@ -36,6 +36,9 @@ LOG = logging.getLogger(__name__)
 INIT_DATA_MAX_AGE = 24 * 60 * 60
 SESSION_MAX_AGE = 6 * 60 * 60
 TICKET_TTL = 5 * 60
+HLS_TICKET_TTL = 60 * 60
+HLS_PLAYLIST_MAX_BYTES = 2 * 1024 * 1024
+HLS_PLAYLIST_MAX_URIS = 3000
 TRAVEL_BATCH_LIMIT = 25
 SHIKIMORI_AUTO_LINK_BATCH = 50
 SHIKIMORI_IMPORT_PAGE_SIZE = 50
@@ -44,6 +47,7 @@ SHIKIMORI_BACKGROUND_STATUSES = ("watching", "planned")
 SHIKIMORI_BACKGROUND_RETRY_SECONDS = 15 * 60
 SHIKIMORI_BACKGROUND_POLL_SECONDS = 60
 SHIKIMORI_ANIME_SLUG = re.compile(r"(?:^|/)([1-9][0-9]{0,8})-[a-z0-9-]+/?$", re.IGNORECASE)
+HLS_URI_ATTRIBUTE = re.compile(r"(?P<prefix>\bURI=)(?P<quote>[\"'])(?P<value>.*?)(?P=quote)")
 
 
 class WebAuthError(ValueError):
@@ -145,6 +149,65 @@ class EphemeralTickets:
         for key, item in list(self._items.items()):
             if item.expires_at <= moment:
                 self._items.pop(key, None)
+
+
+def _is_hls(url, content_type):
+    """Detect a playlist without relying solely on the CDN's MIME type."""
+    media_type = str(content_type or "").split(";", 1)[0].strip().casefold()
+    return media_type in {"application/vnd.apple.mpegurl", "application/x-mpegurl", "audio/mpegurl"} \
+        or urlsplit(str(url)).path.casefold().endswith(".m3u8")
+
+
+def _hls_target(base_url, value):
+    """Resolve an upstream playlist reference; the browser never supplies it."""
+    target = urljoin(base_url, str(value).strip())
+    parts = urlsplit(target)
+    if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
+        return None
+    return target
+
+
+def _rewrite_hls_playlist(payload, base_url, user_id, tickets):
+    """Replace HLS child URLs with ephemeral, owner-bound proxy tickets."""
+    lines, count = [], 0
+
+    def ticket_url(value):
+        nonlocal count
+        target = _hls_target(base_url, value)
+        if target is None:
+            raise ValueError("unsafe HLS URL")
+        count += 1
+        if count > HLS_PLAYLIST_MAX_URIS:
+            raise ValueError("too many HLS URLs")
+        return "/api/stream/" + tickets.create(user_id, target, ttl=HLS_TICKET_TTL)
+
+    for line in payload.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            ending = line[len(line.rstrip("\r\n")):]
+            lines.append(ticket_url(stripped) + ending)
+            continue
+        if "URI=" in line:
+            lines.append(HLS_URI_ATTRIBUTE.sub(
+                lambda match: match.group("prefix") + match.group("quote")
+                + ticket_url(match.group("value")) + match.group("quote"), line))
+            continue
+        lines.append(line)
+    return "".join(lines)
+
+
+async def _read_hls_playlist(upstream):
+    """Buffer only a bounded text playlist; video remains stream-through."""
+    chunks, total = [], 0
+    async for chunk in upstream.aiter_bytes(64 * 1024):
+        total += len(chunk)
+        if total > HLS_PLAYLIST_MAX_BYTES:
+            raise ValueError("HLS playlist is too large")
+        chunks.append(chunk)
+    try:
+        return b"".join(chunks).decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError("invalid HLS playlist") from exc
 
 
 class RateLimiter:
@@ -1365,6 +1428,22 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
             await upstream.aclose()
             await client.aclose()
             raise HTTPException(502, "Поток Anime365 временно недоступен.")
+
+        # A direct HLS URL is preferred.  When a WebView needs the fallback,
+        # rewrite only the small manifest: variants, segments and key URLs stay
+        # behind owner-bound tickets while video bytes are never buffered here.
+        if not request.headers.get("range") and _is_hls(item.url, upstream.headers.get("content-type")):
+            try:
+                playlist = await _read_hls_playlist(upstream)
+                rewritten = _rewrite_hls_playlist(playlist, item.url, user_id, app.state.tickets)
+            except ValueError:
+                await upstream.aclose()
+                await client.aclose()
+                raise HTTPException(502, "Не удалось подготовить HLS-поток Anime365.") from None
+            await upstream.aclose()
+            await client.aclose()
+            return Response(content=rewritten, media_type="application/vnd.apple.mpegurl",
+                            headers={"Cache-Control": "no-store"})
 
         async def body():
             try:

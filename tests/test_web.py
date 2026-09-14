@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import re
 import tempfile
 import time
 import unittest
@@ -243,6 +244,58 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.content, b"234")
         self.assertEqual(response.headers["content-range"], "bytes 2-4/10")
         self.assertEqual(seen, ["bytes=2-4"])
+
+    def test_hls_proxy_rewrites_playlist_children_to_owner_bound_tickets(self):
+        seen = []
+
+        def upstream(request):
+            seen.append(str(request.url))
+            if request.url.path == "/master.m3u8":
+                return httpx.Response(200, headers={"content-type": "application/vnd.apple.mpegurl"},
+                                      text='''#EXTM3U
+#EXT-X-KEY:METHOD=AES-128,URI="https://keys.example/key.bin?secret=private"
+#EXTINF:6,
+segments/one.ts?signature=private
+#EXT-X-STREAM-INF:BANDWIDTH=1000
+variants/720.m3u8?signature=private
+''')
+            if request.url.path == "/segments/one.ts":
+                return httpx.Response(206, headers={"content-type": "video/mp2t", "content-length": "3",
+                                                      "content-range": "bytes 2-4/10", "accept-ranges": "bytes"},
+                                      content=b"234")
+            if request.url.path == "/variants/720.m3u8":
+                return httpx.Response(200, headers={"content-type": "application/vnd.apple.mpegurl"},
+                                      text="#EXTM3U\n#EXTINF:6,\n../segments/two.ts?signature=private\n")
+            return httpx.Response(200, headers={"content-type": "application/octet-stream"}, content=b"key")
+
+        app = create_app(self.config, self.store, self.anime,
+                         proxy_transport=httpx.MockTransport(upstream))
+        client = TestClient(app)
+        try:
+            ticket = app.state.tickets.create(42, "https://cdn.example/master.m3u8?signature=private")
+            playlist = client.get(f"/api/stream/{ticket}", headers=self.headers(42))
+            child_urls = re.findall(r"/api/stream/[A-Za-z0-9_-]+", playlist.text)
+            media_urls = [line for line in playlist.text.splitlines() if line.startswith("/api/stream/")]
+            segment_url, variant_url = media_urls
+            self.store.add_allowed_user(7, owner_id=42)
+            denied = client.get(segment_url, headers=self.headers(7))
+            segment = client.get(segment_url, headers={**self.headers(42), "Range": "bytes=2-4"})
+            variant = client.get(variant_url, headers=self.headers(42))
+        finally:
+            client.close()
+        self.assertEqual(playlist.status_code, 200)
+        self.assertTrue(playlist.headers["content-type"].startswith("application/vnd.apple.mpegurl"))
+        self.assertGreaterEqual(len(child_urls), 3)
+        self.assertIn('URI="/api/stream/', playlist.text)
+        self.assertNotIn("signature=private", playlist.text)
+        self.assertNotIn("secret=private", playlist.text)
+        self.assertEqual(denied.status_code, 404)
+        self.assertEqual(segment.status_code, 206)
+        self.assertEqual(segment.content, b"234")
+        self.assertIn("/api/stream/", variant.text)
+        self.assertNotIn("signature=private", variant.text)
+        self.assertIn("https://cdn.example/master.m3u8?signature=private", seen)
+        self.assertIn("https://cdn.example/segments/one.ts?signature=private", seen)
 
     def test_shikimori_status_is_private_and_unconfigured_connect_is_rejected(self):
         status = self.client.get("/api/shikimori/status", headers=self.headers(42))
