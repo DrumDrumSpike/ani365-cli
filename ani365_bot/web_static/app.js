@@ -15,16 +15,7 @@
   }
   const fail = error => { root.innerHTML = `<p class="error">${esc(error.message || error)}</p>`; };
   function back() { telegram?.BackButton.hide(); home(); }
-  function injectShikimoriStatusControl() {
-    const episodes = root.querySelector('.episodes');
-    const item = state.selected?.item;
-    if (!episodes || !item?.shikimori_status || root.querySelector('#shiki-status')) return;
-    const panel = document.createElement('section');
-    panel.className = 'panel';
-    panel.innerHTML = `<h2>Shikimori</h2><select id="shiki-status">${[['planned','Запланировано'],['watching','Смотрю'],['rewatching','Пересматриваю'],['completed','Просмотрено'],['on_hold','Отложено'],['dropped','Брошено']].map(([value,label]) => `<option value="${value}" ${item.shikimori_status === value ? 'selected' : ''}>${label}</option>`).join('')}</select><button class="action secondary" id="save-shiki-status">Сохранить статус</button>`;
-    episodes.before(panel);
-  }
-  function useBack() { telegram?.BackButton.show(); telegram?.BackButton.onClick(back); injectShikimoriStatusControl(); }
+  function useBack() { telegram?.BackButton.show(); telegram?.BackButton.onClick(back); }
   root.addEventListener('click', async event => {
     if (event.target.id !== 'save-shiki-status' || !state.selected) return;
     try {
@@ -110,7 +101,43 @@
     } catch(error) { fail(error); }
   }
   async function details(seriesId) {
-    try { const data = await api(`/api/library/${seriesId}`); state.selected = data; const p = data.playback; const currentMode = data.item.notifications_enabled ? data.item.notification_mode : ''; root.innerHTML = `<h1>${esc(data.item.title)}</h1>${data.item.poster_url ? `<img class="detail-poster" src="${esc(data.item.poster_url)}" alt="" loading="lazy">` : ''}<p class="meta">Просмотрено: ${esc(data.item.last_watched_episode_number || 0)} / ${data.episodes.length}${data.item.shikimori_status ? ` · Shikimori: ${esc(shikimoriStatus(data.item.shikimori_status))}` : ''}</p>${p ? `<button class="action" id="resume">Продолжить с ${Math.floor(p.position_seconds/60)}:${String(Math.floor(p.position_seconds%60)).padStart(2,'0')}</button>` : ''}<section class="panel"><h2>Уведомления</h2><select id="notification-mode"><option value="">Отключены</option><option value="any" ${currentMode === 'any' ? 'selected' : ''}>Любая новая серия</option><option value="subtitles" ${currentMode === 'subtitles' ? 'selected' : ''}>Русские субтитры</option><option value="voice" ${currentMode === 'voice' ? 'selected' : ''}>Русская озвучка</option></select><button class="action secondary" id="save-notifications">Сохранить уведомления</button></section><h2>Серии</h2><div class="episodes">${data.episodes.map(ep => `<button class="action ${ep.watched ? 'secondary' : ''}" data-episode="${ep.id}">${ep.watched ? '✓ ' : ''}${esc(ep.number)}</button>`).join('')}</div><button class="action secondary" id="remove-series">Удалить из «Смотрю»</button><button class="action secondary back">Назад</button>`; useBack(); root.querySelector('.back').onclick = back; root.querySelector('#save-notifications').onclick = async () => { try { const mode = root.querySelector('#notification-mode').value; await api(`/api/library/${seriesId}/notifications`, {method:'PATCH',body:JSON.stringify({enabled:Boolean(mode),mode:mode || 'any'})}); details(seriesId); } catch(error) { fail(error); } }; root.querySelector('#remove-series').onclick = async () => { try { await api(`/api/library/${seriesId}`, {method:'DELETE'}); home(); } catch(error) { fail(error); } }; if (p) root.querySelector('#resume').onclick = () => selectEpisode(p.episode_id); root.querySelectorAll('[data-episode]').forEach(button => button.onclick = () => selectEpisode(Number(button.dataset.episode))); } catch(error) { fail(error); }
+    try {
+      const data = await api(`/api/library/${seriesId}`); state.selected = data;
+      const p = data.playback;
+      const currentMode = data.item.notifications_enabled ? data.item.notification_mode : '';
+      const shikimori = data.item.shikimori_status
+        ? `<section class="panel"><h2>Shikimori</h2><select id="shiki-status">${[['planned','Запланировано'],['watching','Смотрю'],['rewatching','Пересматриваю'],['completed','Просмотрено'],['on_hold','Отложено'],['dropped','Брошено']].map(([value,label]) => `<option value="${value}" ${data.item.shikimori_status === value ? 'selected' : ''}>${label}</option>`).join('')}</select><button class="action secondary" id="save-shiki-status">Сохранить статус</button><button class="action secondary" id="refresh-shikimori">Обновить обложку</button><button class="action secondary" id="choose-shikimori">Перепривязать Shikimori</button></section>`
+        : `<section class="panel"><h2>Shikimori</h2><p class="meta">Привяжите тайтл из уже импортированного списка, чтобы добавить статус и обложку.</p><button class="action secondary" id="choose-shikimori">Привязать Shikimori</button></section>`;
+      root.innerHTML = `<section class="title-header"><div><h1>${esc(data.item.title)}</h1><p class="meta">Просмотрено: ${esc(data.item.last_watched_episode_number || 0)} / ${data.episodes.length}${data.item.shikimori_status ? ` · Shikimori: ${esc(shikimoriStatus(data.item.shikimori_status))}` : ''}</p>${p ? `<button class="action" id="resume">Продолжить с ${Math.floor(p.position_seconds/60)}:${String(Math.floor(p.position_seconds%60)).padStart(2,'0')}</button>` : ''}</div>${data.item.poster_url ? `<img class="detail-poster" src="${esc(data.item.poster_url)}" alt="" loading="lazy">` : ''}</section><section class="panel"><h2>Уведомления</h2><select id="notification-mode"><option value="">Отключены</option><option value="any" ${currentMode === 'any' ? 'selected' : ''}>Любая новая серия</option><option value="subtitles" ${currentMode === 'subtitles' ? 'selected' : ''}>Русские субтитры</option><option value="voice" ${currentMode === 'voice' ? 'selected' : ''}>Русская озвучка</option></select><button class="action secondary" id="save-notifications">Сохранить уведомления</button></section>${shikimori}<h2>Серии</h2><div class="episodes">${data.episodes.map(ep => `<button class="action ${ep.watched ? 'secondary' : ''}" data-episode="${ep.id}">${ep.watched ? '✓ ' : ''}${esc(ep.number)}</button>`).join('')}</div><button class="action secondary" id="remove-series">Удалить из «Смотрю»</button><button class="action secondary back">Назад</button>`;
+      useBack(); root.querySelector('.back').onclick = back;
+      root.querySelector('#save-notifications').onclick = async () => { try {
+        const mode = root.querySelector('#notification-mode').value;
+        await api(`/api/library/${seriesId}/notifications`, {method:'PATCH', body:JSON.stringify({enabled:Boolean(mode), mode:mode || 'any'})});
+        details(seriesId);
+      } catch(error) { fail(error); } };
+      root.querySelector('#remove-series').onclick = async () => { try { await api(`/api/library/${seriesId}`, {method:'DELETE'}); home(); } catch(error) { fail(error); } };
+      root.querySelector('#choose-shikimori').onclick = () => shikimoriLibraryLinks(seriesId, data.item.title);
+      const refresh = root.querySelector('#refresh-shikimori');
+      if (refresh) refresh.onclick = async () => { try { refresh.disabled = true; refresh.textContent = 'Обновляем…'; await api(`/api/library/${seriesId}/shikimori-metadata`, {method:'POST'}); details(seriesId); } catch(error) { fail(error); } };
+      if (p) root.querySelector('#resume').onclick = () => selectEpisode(p.episode_id);
+      root.querySelectorAll('[data-episode]').forEach(button => button.onclick = () => selectEpisode(Number(button.dataset.episode)));
+    } catch(error) { fail(error); }
+  }
+
+  async function shikimoriLibraryLinks(seriesId, initialQuery) {
+    const render = async query => {
+      try {
+        const data = await api(`/api/library/${seriesId}/shikimori-rates?query=${encodeURIComponent(query)}`);
+        root.innerHTML = `<h1>Привязать Shikimori</h1><p class="meta">Выберите тайтл из вашего импортированного списка. Это изменит только вашу привязку; общие MAL-сопоставления не меняются вручную.</p><input id="shiki-link-query" value="${esc(query)}" placeholder="Название в Shikimori"><button class="action" id="find-shiki-rate">Найти</button>${data.items.length ? data.items.map(item => `<section class="panel"><strong>${esc(item.title)}</strong><p class="meta">${esc(shikimoriStatus(item.status))} · ${esc(item.episodes)} сер.</p><button class="action" data-shiki-rate="${esc(item.external_rate_id)}">Привязать</button></section>`).join('') : '<p class="empty">Совпадений нет. Сначала импортируйте этот статус в настройках Shikimori или уточните название.</p>'}<button class="action secondary back">Назад</button>`;
+        useBack(); root.querySelector('.back').onclick = () => details(seriesId);
+        root.querySelector('#find-shiki-rate').onclick = () => render(root.querySelector('#shiki-link-query').value);
+        root.querySelectorAll('[data-shiki-rate]').forEach(button => button.onclick = async () => { try {
+          await api(`/api/library/${seriesId}/shikimori-link`, {method:'POST', body:JSON.stringify({external_rate_id:button.dataset.shikiRate})});
+          details(seriesId);
+        } catch(error) { fail(error); } });
+      } catch(error) { fail(error); }
+    };
+    await render(initialQuery);
   }
   async function selectEpisode(episodeId) { try { state.episode = state.selected.episodes.find(item => item.id === episodeId); const data = await api(`/api/episodes/${episodeId}/translations`); root.innerHTML = `<h1>Серия ${esc(state.episode.number)}</h1>${data.groups.map(group => `<section class="panel"><h2>${esc(group.label)}</h2>${group.items.map(item => `<button class="action secondary" data-translation="${item.id}">${esc(item.authorsSummary || item.title || 'Перевод')}</button>`).join('')}</section>`).join('')}<button class="action secondary back">Назад</button>`; useBack(); root.querySelector('.back').onclick = () => details(state.selected.item.series_id); root.querySelectorAll('[data-translation]').forEach(button => button.onclick = () => qualities(Number(button.dataset.translation))); } catch(error) { fail(error); } }
   async function qualities(translationId) { try { state.translation = translationId; const data = await api(`/api/translations/${translationId}/qualities`); root.innerHTML = `<h1>Качество</h1>${data.items.map(value => `<section class="panel"><strong>${value}p</strong><div><button class="action" data-watch="${value}">Смотреть</button><button class="action secondary" data-browser="${value}">Скачать</button><button class="action secondary" data-telegram="${value}">В Telegram</button><button class="action secondary" data-travel="${value}">В поездку</button></div></section>`).join('')}<button class="action secondary back">Назад</button>`; root.querySelector('.back').onclick = () => selectEpisode(state.episode.id); root.querySelectorAll('[data-watch]').forEach(button => button.onclick = () => player(Number(button.dataset.watch))); root.querySelectorAll('[data-browser]').forEach(button => button.onclick = () => queueDownload(Number(button.dataset.browser), 'browser')); root.querySelectorAll('[data-telegram]').forEach(button => button.onclick = () => queueDownload(Number(button.dataset.telegram), 'telegram')); root.querySelectorAll('[data-travel]').forEach(button => button.onclick = () => travelMode(Number(button.dataset.travel))); } catch(error) { fail(error); } }

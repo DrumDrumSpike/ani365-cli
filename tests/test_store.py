@@ -69,6 +69,20 @@ class StoreTests(unittest.TestCase):
         self.reopen()
         self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
 
+    def test_v8_metadata_migration_adds_shared_title_cache(self):
+        self.store.save_external_anime_metadata("shikimori", "501", poster_url="https://example.test/501.jpg")
+        self.store.close()
+        db_path = self.directory / "bot.sqlite3"
+        db = sqlite3.connect(db_path)
+        db.execute("ALTER TABLE external_anime_metadata DROP COLUMN title")
+        db.execute("PRAGMA user_version = 8")
+        db.commit()
+        db.close()
+        self.store = Store(self.directory)
+        columns = {row[1] for row in self.store.db.execute("PRAGMA table_info(external_anime_metadata)")}
+        self.assertIn("title", columns)
+        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+
     def test_owner_is_always_allowed_and_cannot_be_revoked(self):
         owner = 42
         self.assertTrue(self.store.is_allowed(owner, owner))
@@ -187,6 +201,15 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([row["external_rate_id"]
                           for row in self.store.external_user_rates(1, "shikimori", limit=2, offset=2)], ["2"])
         self.assertEqual(self.store.external_user_rate_count(2, "shikimori", linked=False), 0)
+
+    def test_unlinked_shikimori_search_is_private_and_handles_cyrillic_case(self):
+        self.store.import_external_rates(1, "shikimori", [{
+            "external_rate_id": "1", "external_anime_id": "501", "status": "planned",
+            "episodes": 0, "title": "Провожающая в последний путь Фрирен",
+        }])
+        found = self.store.search_unlinked_external_user_rates(1, "shikimori", "ФРИРЕН")
+        self.assertEqual([row["external_rate_id"] for row in found], ["1"])
+        self.assertEqual(self.store.search_unlinked_external_user_rates(2, "shikimori", "Фрирен"), [])
 
     def test_shikimori_public_metadata_is_returned_only_for_linked_owner_titles(self):
         self.store.add_watchlist(1, 10, "Local")
