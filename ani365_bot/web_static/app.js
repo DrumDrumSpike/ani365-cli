@@ -15,7 +15,25 @@
   }
   const fail = error => { root.innerHTML = `<p class="error">${esc(error.message || error)}</p>`; };
   function back() { telegram?.BackButton.hide(); home(); }
-  function useBack() { telegram?.BackButton.show(); telegram?.BackButton.onClick(back); }
+  function injectShikimoriStatusControl() {
+    const episodes = root.querySelector('.episodes');
+    const item = state.selected?.item;
+    if (!episodes || !item?.shikimori_status || root.querySelector('#shiki-status')) return;
+    const panel = document.createElement('section');
+    panel.className = 'panel';
+    panel.innerHTML = `<h2>Shikimori</h2><select id="shiki-status">${[['planned','Запланировано'],['watching','Смотрю'],['rewatching','Пересматриваю'],['completed','Просмотрено'],['on_hold','Отложено'],['dropped','Брошено']].map(([value,label]) => `<option value="${value}" ${item.shikimori_status === value ? 'selected' : ''}>${label}</option>`).join('')}</select><button class="action secondary" id="save-shiki-status">Сохранить статус</button>`;
+    episodes.before(panel);
+  }
+  function useBack() { telegram?.BackButton.show(); telegram?.BackButton.onClick(back); injectShikimoriStatusControl(); }
+  root.addEventListener('click', async event => {
+    if (event.target.id !== 'save-shiki-status' || !state.selected) return;
+    try {
+      await api(`/api/library/${state.selected.item.series_id}/shikimori-status`, {
+        method: 'PATCH', body: JSON.stringify({status: root.querySelector('#shiki-status').value}),
+      });
+      details(state.selected.item.series_id);
+    } catch (error) { fail(error); }
+  });
   async function home() {
     try {
       telegram?.BackButton.hide();

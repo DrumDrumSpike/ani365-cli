@@ -671,6 +671,18 @@ class Store:
                 WHERE user_id=? AND provider=? AND external_rate_id=?
             """, (episodes, user_id, str(provider), str(rate_id)))
 
+    def update_external_rate_status(self, user_id, provider, rate_id, status):
+        user_id = self._positive_id(user_id, "user_id")
+        status = str(status).strip()
+        if not status:
+            raise ValueError("External status is required")
+        with self.db:
+            cursor = self.db.execute("""
+                UPDATE external_user_rates SET status=?
+                WHERE user_id=? AND provider=? AND external_rate_id=?
+            """, (status, user_id, str(provider), str(rate_id)))
+        return bool(cursor.rowcount)
+
     # Existing global bot settings API. Telegram's polling offset remains global.
     def get(self, name, default=""):
         row = self.db.execute("SELECT value FROM settings WHERE name=?", (name,)).fetchone()

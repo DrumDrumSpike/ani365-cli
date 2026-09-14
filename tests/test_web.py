@@ -241,6 +241,27 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.client.patch("/api/shikimori/settings", headers=self.headers(99),
                                            json={"sync_enabled": True}).status_code, 403)
 
+    def test_shikimori_status_update_is_owner_bound_and_updates_only_selected_status(self):
+        self.store.add_watchlist(42, 55, "Title")
+        self.store.save_external_account(42, "shikimori", "access", "refresh", time.time() + 3600, "123")
+        self.store.import_external_rates(42, "shikimori", [{
+            "external_rate_id": "50", "external_anime_id": "700", "status": "watching",
+            "episodes": 2, "title": "Title",
+        }])
+        self.store.link_external_user_rate(42, "shikimori", "50", 55)
+        shikimori = type("Shikimori", (), {})()
+        shikimori.update_user_rate = AsyncMock()
+        self.app.state.shikimori = shikimori
+        result = self.client.patch("/api/library/55/shikimori-status", headers=self.headers(42),
+                                   json={"status": "completed"})
+        self.assertEqual(result.json(), {"status": "completed"})
+        self.assertEqual(shikimori.update_user_rate.await_args.args, ("access", "50"))
+        self.assertEqual(shikimori.update_user_rate.await_args.kwargs, {"status": "completed"})
+        self.assertEqual(self.store.external_user_rate(42, "shikimori", "50")["status"], "completed")
+        self.store.add_allowed_user(7, owner_id=42)
+        self.assertEqual(self.client.patch("/api/library/55/shikimori-status", headers=self.headers(7),
+                                           json={"status": "watching"}).status_code, 404)
+
     def test_shikimori_import_uses_anime_id_mal_bridge_and_alternative_title_searches(self):
         self.store.save_external_account(42, "shikimori", "shiki-access", "shiki-refresh",
                                          time.time() + 3600, "123")

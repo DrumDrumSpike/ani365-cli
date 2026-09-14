@@ -174,6 +174,9 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.external_user_rate(1, "shikimori", "101")["episodes"], 7)
         self.store.update_external_rate_episodes(1, "shikimori", "101", 8)
         self.assertEqual(self.store.external_rate_for_series(1, "shikimori", 10)["episodes"], 8)
+        self.assertTrue(self.store.update_external_rate_status(1, "shikimori", "101", "completed"))
+        self.assertEqual(self.store.external_user_rate(1, "shikimori", "101")["status"], "completed")
+        self.assertFalse(self.store.update_external_rate_status(2, "shikimori", "101", "watching"))
 
     def test_shikimori_public_metadata_is_returned_only_for_linked_owner_titles(self):
         self.store.add_watchlist(1, 10, "Local")

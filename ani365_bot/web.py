@@ -214,6 +214,10 @@ class ShikimoriSettingsRequest(BaseModel):
     sync_enabled: bool
 
 
+class ShikimoriStatusRequest(BaseModel):
+    status: str = Field(pattern="^(planned|watching|rewatching|completed|on_hold|dropped)$")
+
+
 def _api_error(exc):
     raise HTTPException(409 if exc.code in (401, 403) else 502, str(exc)) from None
 
@@ -673,6 +677,23 @@ def create_app(config=None, store=None, anime=None, *, proxy_transport=None):
         if item is None:
             raise HTTPException(404, "Anime is not in your library.")
         return item
+
+    @app.patch("/api/library/{series_id}/shikimori-status")
+    async def update_shikimori_status(series_id: int, payload: ShikimoriStatusRequest,
+                                      user_id=Depends(authenticated_user)):
+        if not store.has_watchlist(user_id, series_id):
+            raise HTTPException(404, "Anime is not in your library.")
+        rate = store.external_rate_for_series(user_id, "shikimori", series_id)
+        if not rate:
+            raise HTTPException(409, "Сначала привяжите этот тайтл к Shikimori.")
+        account = await shikimori_account(user_id)
+        try:
+            await app.state.shikimori.update_user_rate(account["access_token"], rate["external_rate_id"],
+                                                       status=payload.status)
+        except ShikimoriError as exc:
+            raise HTTPException(502, str(exc)) from None
+        store.update_external_rate_status(user_id, "shikimori", rate["external_rate_id"], payload.status)
+        return {"status": payload.status}
 
     @app.get("/api/catalog")
     async def catalog(query: str, user_id=Depends(authenticated_user)):

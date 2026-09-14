@@ -16,6 +16,7 @@ class Shikimori:
     anime_batch_size = 50
     # Keep well below both published per-second and per-minute request limits.
     anime_batch_delay = 0.7
+    user_rate_statuses = {"planned", "watching", "rewatching", "completed", "on_hold", "dropped"}
 
     def __init__(self, client_id, client_secret, redirect_uri, app_name="ani365-mini-app"):
         self.client_id, self.client_secret, self.redirect_uri = client_id, client_secret, redirect_uri
@@ -133,11 +134,16 @@ class Shikimori:
             raise ShikimoriError("Shikimori вернул неполные данные аниме.")
         return payload
 
-    async def update_user_rate(self, access_token, rate_id, *, episodes=None):
-        """Update only watched count; a library status stays user-controlled."""
+    async def update_user_rate(self, access_token, rate_id, *, episodes=None, status=None):
+        """Update explicitly chosen user-rate fields without exposing tokens."""
         values = {}
         if episodes is not None:
             values["episodes"] = max(0, int(episodes))
+        if status is not None:
+            status = str(status)
+            if status not in self.user_rate_statuses:
+                raise ShikimoriError("Некорректный статус Shikimori.")
+            values["status"] = status
         if not values:
             return
         try:
