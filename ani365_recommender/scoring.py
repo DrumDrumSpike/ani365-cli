@@ -3,6 +3,7 @@ from __future__ import annotations
 
 
 MIN_RATED_COMPLETED = 5
+RECOMMENDABLE_KINDS = frozenset({"tv", "movie"})
 
 
 def _genre_rows(anime):
@@ -61,12 +62,19 @@ def _number(value):
         return 0.0
 
 
+def _franchise(anime):
+    value = anime.get("franchise") if isinstance(anime, dict) else None
+    return str(value or "").strip().casefold() or None
+
+
 def rank(profile, anime_by_id, candidates, resolved, limit=36):
     """Rank only Anime365-confirmed public candidates and explain each card."""
     if len(rated_completed(profile)) < MIN_RATED_COMPLETED:
         return []
     taste = genre_taste(profile, anime_by_id)
     seen_shikimori = {str(item.get("external_anime_id") or "") for item in profile.get("rates", ())}
+    seen_franchises = {_franchise(anime_by_id.get(identifier)) for identifier in seen_shikimori}
+    seen_franchises.discard(None)
     excluded_series = {int(value) for value in profile.get("excluded_anime365_series_ids", ())}
     resolved_by_id = {str(item.get("shikimori_anime_id") or ""): item for item in resolved}
     ranked = []
@@ -74,6 +82,11 @@ def rank(profile, anime_by_id, candidates, resolved, limit=36):
         identifier = str(candidate.get("id") or "").strip()
         match = resolved_by_id.get(identifier)
         if not identifier or identifier in seen_shikimori or not match:
+            continue
+        if str(candidate.get("kind") or "").strip().casefold() not in RECOMMENDABLE_KINDS:
+            continue
+        franchise = _franchise(candidate)
+        if franchise in seen_franchises:
             continue
         if int(match["anime365_series_id"]) in excluded_series:
             continue
@@ -88,17 +101,21 @@ def rank(profile, anime_by_id, candidates, resolved, limit=36):
         ranked.append({
             "anime365_series_id": int(match["anime365_series_id"]),
             "shikimori_anime_id": identifier,
+            "_franchise": franchise,
             "score": round(total, 3),
             "title": match["title"], "year": match.get("year"),
             "series_type": match.get("series_type"), "poster_url": match.get("poster_url"),
             "reason": "Совпадает с любимыми жанрами: " + ", ".join(labels),
         })
-    unique, series_ids = [], set()
+    unique, series_ids, franchises = [], set(), set()
     for item in sorted(ranked, key=lambda row: (-row["score"], row["title"].casefold(),
                                                  row["anime365_series_id"])):
-        if item["anime365_series_id"] not in series_ids:
-            unique.append(item)
+        franchise = item["_franchise"]
+        if item["anime365_series_id"] not in series_ids and (not franchise or franchise not in franchises):
+            unique.append({key: value for key, value in item.items() if key != "_franchise"})
             series_ids.add(item["anime365_series_id"])
+            if franchise:
+                franchises.add(franchise)
         if len(unique) >= max(1, min(50, int(limit))):
             break
     return unique

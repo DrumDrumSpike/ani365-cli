@@ -44,17 +44,18 @@ class ShikimoriPublic:
         for genre in row.get("genres", ()):
             if isinstance(genre, dict) and str(genre.get("id") or "").strip() and str(genre.get("name") or "").strip():
                 genres.append({"id": str(genre["id"]), "name": str(genre["name"])[:80]})
+        franchise = str(row.get("franchise") or "").strip()
         return {"id": identifier, "mal_id": str(row.get("malId") or "").strip() or None,
                 "title": str(row.get("russian") or row.get("name") or "").strip()[:500],
                 "score": row.get("score"), "kind": str(row.get("kind") or "").strip()[:32] or None,
-                "year": aired.get("year"), "genres": genres}
+                "franchise": franchise[:120] or None, "year": aired.get("year"), "genres": genres}
 
     async def metadata(self, anime_ids):
         identifiers = list(dict.fromkeys(str(value) for value in anime_ids
                                          if str(value).isdigit() and int(value) > 0))
         result = {}
         query = """query RecommendationMetadata($ids: String!) {
-          animes(ids: $ids) { id malId name russian score kind airedOn { year } genres { id name } }
+          animes(ids: $ids) { id malId name russian score kind franchise airedOn { year } genres { id name } }
         }"""
         for offset in range(0, len(identifiers), self.batch_size):
             if offset:
@@ -69,7 +70,7 @@ class ShikimoriPublic:
     async def candidates(self, genre_ids, *, per_genre=20):
         query = """query RecommendationCandidates($genre: String!) {
           animes(genre: $genre, limit: 20, order: ranked) {
-            id malId name russian score kind airedOn { year } genres { id name }
+            id malId name russian score kind franchise airedOn { year } genres { id name }
           }
         }"""
         result = {}

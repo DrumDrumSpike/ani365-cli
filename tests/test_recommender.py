@@ -1,8 +1,12 @@
 import asyncio
+import json
 import unittest
+
+import httpx
 
 from ani365_recommender.main import refresh
 from ani365_recommender.scoring import genre_taste, rank, top_genres
+from ani365_recommender.shikimori import ShikimoriPublic
 
 
 def profile():
@@ -18,7 +22,7 @@ def profile():
 
 def metadata():
     return {
-        "1": {"genres": [{"id": "10", "name": "Drama"}]},
+        "1": {"franchise": "watched-drama", "genres": [{"id": "10", "name": "Drama"}]},
         "2": {"genres": [{"id": "10", "name": "Drama"}, {"id": "20", "name": "Fantasy"}]},
         "3": {"genres": [{"id": "20", "name": "Fantasy"}]},
         "4": {"genres": [{"id": "10", "name": "Drama"}]},
@@ -34,25 +38,48 @@ class RecommendationScoringTests(unittest.TestCase):
         self.assertEqual(taste["40"]["weight"], -4)
         candidates = [
             {"id": "1", "score": 9, "genres": [{"id": "10", "name": "Drama"}]},
-            {"id": "7", "score": 8, "genres": [{"id": "10", "name": "Drama"}]},
-            {"id": "8", "score": 10, "genres": [{"id": "30", "name": "Comedy"}]},
-            {"id": "10", "score": 10, "genres": [{"id": "40", "name": "Horror"}]},
-            {"id": "9", "score": 9, "genres": [{"id": "20", "name": "Fantasy"}]},
+            {"id": "7", "score": 8, "kind": "tv", "franchise": "fresh-drama", "genres": [{"id": "10", "name": "Drama"}]},
+            {"id": "8", "score": 10, "kind": "tv", "genres": [{"id": "30", "name": "Comedy"}]},
+            {"id": "10", "score": 10, "kind": "tv", "genres": [{"id": "40", "name": "Horror"}]},
+            {"id": "9", "score": 9, "kind": "tv", "genres": [{"id": "20", "name": "Fantasy"}]},
+            {"id": "11", "score": 10, "kind": "special", "franchise": "fresh-drama", "genres": [{"id": "10", "name": "Drama"}]},
+            {"id": "12", "score": 10, "kind": "tv", "franchise": "fresh-drama", "genres": [{"id": "10", "name": "Drama"}]},
+            {"id": "13", "score": 10, "kind": "tv", "franchise": "watched-drama", "genres": [{"id": "10", "name": "Drama"}]},
+            {"id": "14", "score": 10, "kind": "ova", "genres": [{"id": "10", "name": "Drama"}]},
         ]
         resolved = [
             {"shikimori_anime_id": "7", "anime365_series_id": 77, "title": "Drama pick"},
             {"shikimori_anime_id": "8", "anime365_series_id": 88, "title": "Comedy pick"},
             {"shikimori_anime_id": "9", "anime365_series_id": 44, "title": "Already saved"},
             {"shikimori_anime_id": "10", "anime365_series_id": 100, "title": "Dropped genre"},
+            {"shikimori_anime_id": "11", "anime365_series_id": 101, "title": "Special"},
+            {"shikimori_anime_id": "12", "anime365_series_id": 102, "title": "Better drama pick"},
+            {"shikimori_anime_id": "13", "anime365_series_id": 103, "title": "Watched franchise"},
+            {"shikimori_anime_id": "14", "anime365_series_id": 104, "title": "OVA"},
         ]
         result = rank(profile(), metadata(), candidates, resolved)
-        self.assertEqual([item["anime365_series_id"] for item in result], [77])
+        self.assertEqual([item["anime365_series_id"] for item in result], [102])
         self.assertIn("Drama", result[0]["reason"])
 
     def test_requires_five_completed_ratings(self):
         small = profile()
         small["rates"] = small["rates"][:4]
         self.assertEqual(rank(small, metadata(), [], []), [])
+
+
+class ShikimoriPublicTests(unittest.TestCase):
+    def test_candidates_request_and_preserve_franchise(self):
+        def handler(request):
+            payload = json.loads(request.content)
+            self.assertIn("franchise", payload["query"])
+            return httpx.Response(200, json={"data": {"animes": [{
+                "id": "7", "malId": "8", "name": "Name", "russian": "", "score": 9,
+                "kind": "tv", "franchise": "sample-series", "airedOn": {"year": 2025},
+                "genres": [{"id": "1", "name": "Drama"}],
+            }]}})
+
+        result = asyncio.run(ShikimoriPublic(transport=httpx.MockTransport(handler)).candidates(["1"]))
+        self.assertEqual(result[0]["franchise"], "sample-series")
 
 
 class RecommendationRefreshTests(unittest.TestCase):
@@ -79,7 +106,7 @@ class RecommendationRefreshTests(unittest.TestCase):
 
             async def candidates(self, genres):
                 self.genres = genres
-                return [{"id": "7", "mal_id": "7", "score": 8,
+                return [{"id": "7", "mal_id": "7", "score": 8, "kind": "tv",
                          "genres": [{"id": "10", "name": "Drama"}]}]
 
         main, shikimori = Main(), Shikimori()
