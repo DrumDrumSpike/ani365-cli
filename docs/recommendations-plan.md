@@ -9,9 +9,10 @@ Anime365-рекомендаций из его оценок Shikimori и жанр
 ## Развёртывание
 
 Рекомендатор запускается на том же VDS, что и основной бот. Это отдельный
-одноразовый Docker Compose service с лимитами `0.5 CPU` и `256 MiB RAM`, который
-вызывает systemd timer. Он не открывает сетевой порт, не использует Telegram Bot
-API, не скачивает медиа и завершается после расчёта.
+одноразовый Docker Compose service с profile `recommendations`, лимитами `0.5 CPU`
+и `256 MiB RAM`, который вызывает systemd timer. Обычный `docker compose up` не
+запускает его. Он не открывает сетевой порт, не использует Telegram Bot API, не
+скачивает медиа и завершается после расчёта.
 
 ```text
 Shikimori GraphQL -> recommender -> private Docker API web -> bot.sqlite3

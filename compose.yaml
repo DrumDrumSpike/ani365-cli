@@ -110,6 +110,7 @@ services:
     image: ${BOT_IMAGE:-ani365-bot:local}
     build: .
     command: ["python", "-m", "ani365_recommender.main"]
+    profiles: ["recommendations"]
     environment:
       MAIN_API_URL: http://web:8000
       RECOMMENDER_SHARED_SECRET: ${RECOMMENDER_SHARED_SECRET:-}

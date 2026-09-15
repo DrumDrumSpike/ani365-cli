@@ -306,7 +306,9 @@ sudoedit .env
 # RECOMMENDER_SHARED_SECRET=<сгенерированное значение>
 ```
 
-После обновления репозитория установи timer и сначала запусти задачу вручную:
+После обновления репозитория установи timer и сначала запусти задачу вручную.
+Сервис включён в Compose profile `recommendations`, поэтому обычный `docker compose up`
+его не запускает:
 
 ```bash
 sudo install -m 644 deploy/ani365-recommender.service /etc/systemd/system/

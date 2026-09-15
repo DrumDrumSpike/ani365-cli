@@ -7,6 +7,6 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/ani365-cli
-ExecStart=/usr/bin/docker compose run --rm recommender
+ExecStart=/usr/bin/docker compose --profile recommendations run --rm recommender
 TimeoutStartSec=20min
 UMask=0077
