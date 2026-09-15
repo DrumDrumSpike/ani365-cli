@@ -48,6 +48,19 @@ class APITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 101)
         self.assertEqual(client.get.call_args_list[1].kwargs["params"]["offset"], 100)
 
+    async def test_search_recovers_title_when_user_omits_em_dash(self):
+        client = AsyncMock()
+        client.get.side_effect = [
+            response({"data": []}),
+            response({"data": [{"id": 198, "titles": {"ru": "Нет игры — нет жизни"}}]}),
+        ]
+        rows = await Anime365(client, "https://example.org/api").search("нет игры нет жизни")
+        self.assertEqual(rows[0]["id"], 198)
+        self.assertEqual(
+            [call.kwargs["params"]["query"] for call in client.get.await_args_list],
+            ["нет игры нет жизни", "нет игры — нет жизни"],
+        )
+
     async def test_telegram_errors_do_not_expose_bot_token_or_response(self):
         client = AsyncMock()
         client.post.return_value = response({"ok": False, "error_code": 429,

@@ -19,7 +19,7 @@ def _strings(value):
 
 def normalise_title(value):
     """Make equivalent punctuation/case variants comparable without transliteration."""
-    value = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    value = unicodedata.normalize("NFKC", str(value or "")).casefold().replace("ё", "е")
     return " ".join(re.sub(r"[^\w]+", " ", value, flags=re.UNICODE).split())
 
 

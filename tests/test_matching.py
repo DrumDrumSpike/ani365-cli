@@ -1,9 +1,13 @@
 import unittest
 
-from ani365_bot.matching import rank_anime365_candidates, shikimori_mal_ids, shikimori_titles
+from ani365_bot.matching import normalise_title, rank_anime365_candidates, shikimori_mal_ids, shikimori_titles
 
 
 class ShikimoriMatchingTests(unittest.TestCase):
+    def test_normalise_title_ignores_punctuation_and_yo(self):
+        self.assertEqual(normalise_title("Нет игры — нет жизни"), "нет игры нет жизни")
+        self.assertEqual(normalise_title("Ёлка!"), "елка")
+
     def test_uses_shikimori_anime_id_as_mal_bridge_when_mal_id_is_empty(self):
         anime = {"id": 52991, "mal_id": None, "russian": "Фрирен", "aired_on": "2023-09-29",
                  "kind": "tv"}

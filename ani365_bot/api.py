@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import unquote, urljoin, urlsplit
 
 from .http import NetworkError
+from .matching import normalise_title
 
 
 LOG = logging.getLogger(__name__)
@@ -199,17 +200,89 @@ class Anime365:
                 return result
         raise APIError("Слишком много результатов. Уточни название.")
 
+    @staticmethod
+    def _search_fallbacks(query):
+        """Return a few safe variants for catalogues that index punctuation literally.
+
+        Anime365 sometimes treats an em dash as part of a title. People
+        normally omit it while typing, e.g. ``Нет игры нет жизни``. Trying a
+        midpoint dash first keeps that common form a precise lookup. Individual
+        distinctive words are only a bounded final fallback, so a broad search
+        never turns into a large sequence of upstream requests.
+        """
+        normalised = normalise_title(query)
+        words = normalised.split()
+        result, seen = [], {str(query).strip().casefold()}
+
+        def add(value):
+            key = str(value).strip().casefold()
+            if key and key not in seen:
+                result.append(str(value))
+                seen.add(key)
+
+        if len(words) >= 2:
+            split_at = max(1, len(words) // 2)
+            add(" ".join(words[:split_at]) + " — " + " ".join(words[split_at:]))
+        # Prefer sufficiently specific words. Two requests are enough to
+        # recover a title when its punctuation differs without overloading the
+        # API for a short, generic query.
+        for word in sorted(dict.fromkeys(words), key=lambda value: (-len(value), value)):
+            if len(word) >= 4:
+                add(word)
+            if len(result) >= 3:
+                break
+        return result
+
+    async def _search_page(self, query):
+        """Read one ranked fallback page; normal searches remain fully paginated."""
+        data = await self.get(
+            "series", query=query, limit=100, offset=0,
+            fields="id,titles,type,typeTitle,year,myAnimeListId,posterUrl,posterUrlSmall")
+        if not isinstance(data, list) or any(not isinstance(row, dict) or "id" not in row for row in data):
+            raise APIError("Anime365 вернул неизвестный формат списка.")
+        return data
+
     async def search(self, query):
-        rows = await self.listing("series", query=query,
-                                  fields="id,titles,type,typeTitle,year,myAnimeListId,posterUrl,posterUrlSmall")
-        needle = query.casefold()
+        fields = "id,titles,type,typeTitle,year,myAnimeListId,posterUrl,posterUrlSmall"
+        rows = await self.listing("series", query=query, fields=fields)
+        needle = normalise_title(query)
+
+        def names_for(row):
+            titles = row.get("titles") if isinstance(row.get("titles"), dict) else {}
+            return [normalise_title(value) for value in titles.values()]
+
+        def has_exact_match(items):
+            return bool(needle) and any(needle in names_for(row) for row in items)
+
+        # A fallback is useful only when the upstream result did not include
+        # the punctuation-insensitive exact title. This keeps ordinary search
+        # to a single Anime365 request.
+        if not has_exact_match(rows):
+            for fallback in self._search_fallbacks(query):
+                rows.extend(await self._search_page(fallback))
+                if has_exact_match(rows):
+                    break
+
+        unique = {}
+        for row in rows:
+            try:
+                unique.setdefault(int(row["id"]), row)
+            except (KeyError, TypeError, ValueError):
+                continue
 
         def rank(row):
-            names = [str(v).casefold() for v in (row.get("titles") or {}).values()]
-            return (0 if needle in names else 1 if any(needle in name for name in names) else 2,
-                    -number(row.get("year")))
+            names = names_for(row)
+            if needle in names:
+                match_rank, overlap = 0, 0
+            elif needle and any(needle in name for name in names):
+                match_rank, overlap = 1, 0
+            else:
+                wanted = set(needle.split())
+                overlap = max((len(wanted & set(name.split())) for name in names), default=0) if wanted else 0
+                match_rank = 2
+            return (match_rank, -overlap if match_rank == 2 else 0, -number(row.get("year")))
 
-        return sorted(rows, key=rank)
+        return sorted(unique.values(), key=rank)
 
     async def series_by_mal_id(self, mal_id):
         """Find a title through Anime365's stable MyAnimeList filter.
