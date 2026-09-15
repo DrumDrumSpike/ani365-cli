@@ -30,6 +30,7 @@ class Config:
     hentai_url: str = ""
     hentai_token: str = ""
     mal_client_id: str = ""
+    recommender_secret: str = ""
 
     @classmethod
     def from_env(cls):
@@ -66,6 +67,10 @@ class Config:
         mal_client_id = os.environ.get("MAL_CLIENT_ID", "").strip()
         if len(mal_client_id) > 512 or any(char.isspace() for char in mal_client_id):
             raise ConfigError("MAL_CLIENT_ID must be a single client identifier")
+        recommender_secret = os.environ.get("RECOMMENDER_SHARED_SECRET", "").strip()
+        if recommender_secret and (len(recommender_secret) < 32 or len(recommender_secret) > 512
+                                  or any(char.isspace() for char in recommender_secret)):
+            raise ConfigError("RECOMMENDER_SHARED_SECRET must contain 32 to 512 non-space characters")
         telegram_url = os.environ.get("TELEGRAM_BOT_API_URL", cls.telegram_url).rstrip("/")
         telegram = urlsplit(telegram_url)
         if (telegram.scheme not in ("http", "https") or not telegram.hostname or telegram.username
@@ -122,4 +127,5 @@ class Config:
                    telegram_url, Path(os.environ.get("MEDIA_DIR", "/jobs")), watch_check_interval,
                    mini_app_url, cookie_secure in ("1", "true", "yes"), completion_threshold,
                    download_workers, download_ttl, shikimori_id, shikimori_secret, shikimori_redirect,
-                   shikimori_import_interval, anime_token, hentai_url, hentai_token, mal_client_id)
+                   shikimori_import_interval, anime_token, hentai_url, hentai_token, mal_client_id,
+                   recommender_secret)

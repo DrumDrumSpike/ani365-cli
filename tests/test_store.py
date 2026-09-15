@@ -227,6 +227,39 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.external_user_rate(1, "shikimori", "101")["status"], "completed")
         self.assertFalse(self.store.update_external_rate_status(2, "shikimori", "101", "watching"))
 
+    def test_recommendation_score_and_feed_are_private_and_replaced_atomically(self):
+        self.store.save_external_account(1, "shikimori", "access", "refresh", 100, "42")
+        self.store.import_external_rates(1, "shikimori", [{
+            "external_rate_id": "101", "external_anime_id": "501", "status": "completed",
+            "episodes": 12, "score": 9, "title": "Loved title",
+        }, {
+            "external_rate_id": "102", "external_anime_id": "502", "status": "completed",
+            "episodes": 12, "score": 0, "title": "Unrated title",
+        }], now=10)
+        self.assertEqual(self.store.external_user_rate(1, "shikimori", "101")["score"], 9)
+        self.assertIsNone(self.store.external_user_rate(1, "shikimori", "102")["score"])
+        profile = self.store.recommendation_profile(1)
+        self.assertNotIn("access", repr(profile))
+        self.assertEqual({item["external_anime_id"] for item in profile["rates"]}, {"501", "502"})
+        self.assertEqual(self.store.recommendation_state(1)["rated_completed"], 1)
+        self.assertEqual(self.store.replace_recommendations(1, [{
+            "anime365_series_id": 55, "shikimori_anime_id": "900", "score": 42.5,
+            "title": "Recommended", "year": 2024, "series_type": "TV",
+            "poster_url": "https://anime.example/posters/55.jpg", "reason": "Genres match",
+        }], generated_at=20), 1)
+        self.assertEqual(self.store.recommendations(1)[0]["title"], "Recommended")
+        self.assertEqual(self.store.replace_recommendations(1, [], generated_at=21), 0)
+        self.assertEqual(self.store.recommendations(1), [])
+        self.assertEqual(self.store.recommendations(2), [])
+
+    def test_v12_schema_has_score_and_recommendation_items(self):
+        columns = {row[1] for row in self.store.db.execute("PRAGMA table_info(external_user_rates)")}
+        self.assertIn("score", columns)
+        tables = {row[0] for row in self.store.db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+        self.assertIn("recommendation_items", tables)
+
     def test_confirmed_external_ids_can_be_read_for_shared_metadata_cache(self):
         self.store.save_external_id(10, "mal", "501")
         self.store.save_external_id(11, "mal", "502")

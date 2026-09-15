@@ -106,6 +106,33 @@ services:
         max-size: 5m
         max-file: "3"
 
+  recommender:
+    image: ${BOT_IMAGE:-ani365-bot:local}
+    build: .
+    command: ["python", "-m", "ani365_recommender.main"]
+    environment:
+      MAIN_API_URL: http://web:8000
+      RECOMMENDER_SHARED_SECRET: ${RECOMMENDER_SHARED_SECRET:-}
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: "no"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "3"
+
   caddy:
     image: caddy:2.10-alpine
     environment:

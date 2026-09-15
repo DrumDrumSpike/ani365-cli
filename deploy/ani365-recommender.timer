@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the ani365 recommendation refresh every Monday
+
+[Timer]
+OnCalendar=Mon *-*-* 04:17:00
+Persistent=true
+RandomizedDelaySec=20min
+
+[Install]
+WantedBy=timers.target

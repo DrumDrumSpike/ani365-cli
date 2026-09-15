@@ -7,7 +7,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 class StateError(ValueError):
@@ -126,6 +126,11 @@ class Store:
             with self.db:
                 self._create_v11()
                 self.db.execute("PRAGMA user_version = 11")
+            version = 11
+        if version < 12:
+            with self.db:
+                self._create_v12()
+                self.db.execute("PRAGMA user_version = 12")
 
     def _create_v1(self):
         """Initial schema, kept idempotent for pre-versioned installations."""
@@ -412,6 +417,35 @@ class Store:
                 ALTER TABLE external_accounts ADD COLUMN auto_complete INTEGER NOT NULL DEFAULT 0
                     CHECK(auto_complete IN (0, 1))
             """)
+
+    def _create_v12(self):
+        """Persist non-secret recommendation inputs and the ready-to-show feed."""
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(external_user_rates)")}
+        if "score" not in columns:
+            self.db.execute("""
+                ALTER TABLE external_user_rates ADD COLUMN score INTEGER
+                    CHECK(score IS NULL OR score BETWEEN 1 AND 10)
+            """)
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS recommendation_items (
+                user_id INTEGER NOT NULL,
+                anime365_series_id INTEGER NOT NULL,
+                shikimori_anime_id TEXT NOT NULL,
+                rank INTEGER NOT NULL CHECK(rank > 0),
+                score REAL NOT NULL,
+                title TEXT NOT NULL,
+                year TEXT,
+                series_type TEXT,
+                poster_url TEXT,
+                reason TEXT NOT NULL,
+                generated_at REAL NOT NULL,
+                PRIMARY KEY(user_id, anime365_series_id)
+            )
+        """)
+        self.db.execute("""
+            CREATE INDEX IF NOT EXISTS recommendation_items_feed_idx
+            ON recommendation_items(user_id, rank)
+        """)
 
     @staticmethod
     def _now(value):
@@ -823,8 +857,17 @@ class Store:
     @staticmethod
     def _external_rate(row):
         keys = ("external_rate_id", "external_anime_id", "status", "episodes", "title",
-                "anime365_series_id", "imported_at")
+                "anime365_series_id", "imported_at", "score")
         return dict(zip(keys, row)) if row else None
+
+    @staticmethod
+    def _recommendation_score(value):
+        """Shikimori uses zero for an unrated title; keep that as NULL locally."""
+        try:
+            value = int(value or 0)
+        except (TypeError, ValueError):
+            return None
+        return value if 1 <= value <= 10 else None
 
     def import_external_rates(self, user_id, provider, rates, now=None):
         """Upsert a filtered external list without changing local progress.
@@ -848,6 +891,7 @@ class Store:
                     episodes = max(0, int(rate.get("episodes") or 0))
                 except (TypeError, ValueError):
                     episodes = 0
+                score = self._recommendation_score(rate.get("score"))
                 if not rate_id or not anime_id or not status:
                     continue
                 mapped = self.external_series_id(provider, anime_id)
@@ -859,14 +903,16 @@ class Store:
                 self.db.execute("""
                     INSERT INTO external_user_rates(
                         user_id, provider, external_rate_id, external_anime_id, status, episodes,
-                        title, anime365_series_id, imported_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        title, anime365_series_id, imported_at, score
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(user_id, provider, external_rate_id) DO UPDATE SET
                         external_anime_id=excluded.external_anime_id, status=excluded.status,
                         episodes=excluded.episodes, title=excluded.title, imported_at=excluded.imported_at,
+                        score=excluded.score,
                         anime365_series_id=COALESCE(external_user_rates.anime365_series_id,
                                                      excluded.anime365_series_id)
-                """, (user_id, provider, rate_id, anime_id, status, episodes, title, series_id, timestamp))
+                """, (user_id, provider, rate_id, anime_id, status, episodes, title, series_id, timestamp,
+                      score))
                 imported.append(rate_id)
         return imported
 
@@ -881,7 +927,7 @@ class Store:
         offset = max(0, int(offset))
         rows = self.db.execute(f"""
             SELECT external_rate_id, external_anime_id, status, episodes, title,
-                   anime365_series_id, imported_at
+                   anime365_series_id, imported_at, score
             FROM external_user_rates WHERE {' AND '.join(where)}
             ORDER BY imported_at DESC, title COLLATE NOCASE LIMIT ? OFFSET ?
         """, [*params, limit, offset]).fetchall()
@@ -903,7 +949,7 @@ class Store:
         user_id = self._positive_id(user_id, "user_id")
         row = self.db.execute("""
             SELECT external_rate_id, external_anime_id, status, episodes, title,
-                   anime365_series_id, imported_at
+                   anime365_series_id, imported_at, score
             FROM external_user_rates
             WHERE user_id=? AND provider=? AND external_rate_id=?
         """, (user_id, str(provider), str(rate_id))).fetchone()
@@ -960,7 +1006,7 @@ class Store:
         series_id = self._positive_id(series_id, "series_id")
         row = self.db.execute("""
             SELECT external_rate_id, external_anime_id, status, episodes, title,
-                   anime365_series_id, imported_at
+                   anime365_series_id, imported_at, score
             FROM external_user_rates
             WHERE user_id=? AND provider=? AND anime365_series_id=?
             ORDER BY imported_at DESC LIMIT 1
@@ -987,6 +1033,94 @@ class Store:
                 WHERE user_id=? AND provider=? AND external_rate_id=?
             """, (status, user_id, str(provider), str(rate_id)))
         return bool(cursor.rowcount)
+
+    def recommendation_profile(self, user_id):
+        """Return one non-secret Shikimori profile for the recommendation worker.
+
+        OAuth credentials intentionally stay in ``external_accounts`` and are
+        never selected here.  The complete imported list is present only to
+        exclude titles the user has already rated or planned to watch.
+        """
+        user_id = self._positive_id(user_id, "user_id")
+        if not self.external_account_status(user_id, "shikimori")["connected"]:
+            return None
+        rows = self.db.execute("""
+            SELECT external_anime_id, status, episodes, score, anime365_series_id, imported_at
+            FROM external_user_rates
+            WHERE user_id=? AND provider='shikimori'
+            ORDER BY imported_at DESC
+        """, (user_id,)).fetchall()
+        excluded = self.db.execute("SELECT series_id FROM watchlist WHERE user_id=?", (user_id,)).fetchall()
+        return {
+            "user_id": user_id,
+            "rates": [{"external_anime_id": str(row[0]), "status": str(row[1]),
+                       "episodes": int(row[2]), "score": row[3],
+                       "anime365_series_id": row[4], "imported_at": float(row[5])}
+                      for row in rows],
+            "excluded_anime365_series_ids": [int(row[0]) for row in excluded],
+        }
+
+    def replace_recommendations(self, user_id, items, *, generated_at=None):
+        """Atomically replace one user's ready feed with validated public cards."""
+        user_id = self._positive_id(user_id, "user_id")
+        timestamp = self._now(generated_at)
+        values, seen = [], set()
+        for position, item in enumerate(items or (), start=1):
+            try:
+                series_id = self._positive_id(item.get("anime365_series_id"), "anime365_series_id")
+                score = float(item.get("score"))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            shikimori_id = str(item.get("shikimori_anime_id") or "").strip()[:32]
+            title = str(item.get("title") or "").strip()[:500]
+            reason = str(item.get("reason") or "").strip()[:300]
+            if series_id in seen or not shikimori_id or not title or not reason:
+                continue
+            seen.add(series_id)
+            values.append((user_id, series_id, shikimori_id, len(values) + 1, score, title,
+                           str(item.get("year") or "").strip()[:32] or None,
+                           str(item.get("series_type") or "").strip()[:64] or None,
+                           str(item.get("poster_url") or "").strip()[:1000] or None,
+                           reason, timestamp))
+            if len(values) == 50:
+                break
+        with self.db:
+            self.db.execute("DELETE FROM recommendation_items WHERE user_id=?", (user_id,))
+            self.db.executemany("""
+                INSERT INTO recommendation_items(
+                    user_id, anime365_series_id, shikimori_anime_id, rank, score, title,
+                    year, series_type, poster_url, reason, generated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, values)
+        return len(values)
+
+    def recommendations(self, user_id, *, limit=36, offset=0):
+        user_id = self._positive_id(user_id, "user_id")
+        limit = max(1, min(50, int(limit)))
+        offset = max(0, int(offset))
+        rows = self.db.execute("""
+            SELECT anime365_series_id, shikimori_anime_id, rank, score, title, year,
+                   series_type, poster_url, reason, generated_at
+            FROM recommendation_items
+            WHERE user_id=? ORDER BY rank LIMIT ? OFFSET ?
+        """, (user_id, limit, offset)).fetchall()
+        keys = ("anime365_series_id", "shikimori_anime_id", "rank", "score", "title", "year",
+                "series_type", "poster_url", "reason", "generated_at")
+        return [dict(zip(keys, row)) for row in rows]
+
+    def recommendation_state(self, user_id):
+        user_id = self._positive_id(user_id, "user_id")
+        connected = self.external_account_status(user_id, "shikimori")["connected"]
+        row = self.db.execute("""
+            SELECT COUNT(*) FROM external_user_rates
+            WHERE user_id=? AND provider='shikimori' AND status='completed'
+              AND score BETWEEN 1 AND 10
+        """, (user_id,)).fetchone()
+        latest = self.db.execute("""
+            SELECT MAX(generated_at) FROM recommendation_items WHERE user_id=?
+        """, (user_id,)).fetchone()
+        return {"connected": connected, "rated_completed": int(row[0]),
+                "generated_at": latest[0] if latest else None}
 
     # Existing global bot settings API. Telegram's polling offset remains global.
     def get(self, name, default=""):

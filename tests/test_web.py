@@ -43,6 +43,7 @@ class WebTests(unittest.TestCase):
                              anime_token="server-anime365-token")
         self.anime = type("Anime", (), {})()
         self.anime.search = AsyncMock(return_value=[])
+        self.anime.series_by_mal_id = AsyncMock(return_value=[])
         self.anime.episodes = AsyncMock(return_value=[{
             "id": 700, "episodeFull": "7", "episodeInt": 7, "episodeType": "tv"
         }])
@@ -78,6 +79,58 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/me", headers=self.headers(99)).status_code, 200)
         self.store.revoke_allowed_user(99, 42)
         self.assertEqual(self.client.get("/api/library", headers=self.headers(99)).status_code, 403)
+
+    def test_recommendation_internal_api_is_secret_bound_and_public_feed_is_owner_bound(self):
+        secret = "a" * 32
+        config = replace(self.config, recommender_secret=secret)
+        app = create_app(config, self.store, self.anime)
+        client = TestClient(app)
+        try:
+            self.store.save_external_account(42, "shikimori", "access-secret", "refresh-secret", 100, "42")
+            self.store.import_external_rates(42, "shikimori", [{
+                "external_rate_id": "1", "external_anime_id": "501", "status": "completed",
+                "episodes": 12, "score": 9, "title": "Private title",
+            }])
+            self.assertEqual(client.get("/internal/recommendations/profiles").status_code, 404)
+            response = client.get("/internal/recommendations/profiles",
+                                  headers={"X-Recommender-Token": secret})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["profiles"][0]["rates"][0]["score"], 9)
+            self.assertNotIn("access-secret", response.text)
+            self.assertNotIn("refresh-secret", response.text)
+            saved = client.put("/internal/recommendations/42", headers={"X-Recommender-Token": secret}, json={
+                "items": [{"anime365_series_id": 55, "shikimori_anime_id": "900", "score": 42,
+                           "title": "Recommended", "year": 2024, "series_type": "TV",
+                           "poster_url": "https://smotret-anime.app/posters/55.jpg",
+                           "reason": "Совпадает с любимыми жанрами: Драма"}],
+            })
+            self.assertEqual(saved.status_code, 200)
+            feed = client.get("/api/recommendations", headers=self.headers(42))
+            self.assertEqual(feed.status_code, 200)
+            self.assertEqual(feed.json()["items"][0]["anime365_series_id"], 55)
+            self.store.add_allowed_user(7, owner_id=42)
+            self.assertEqual(client.get("/api/recommendations", headers=self.headers(7)).json()["items"], [])
+        finally:
+            client.close()
+
+    def test_recommendation_resolver_accepts_only_exact_anime365_mal_result(self):
+        secret = "b" * 32
+        config = replace(self.config, recommender_secret=secret)
+        self.anime.series_by_mal_id = AsyncMock(return_value=[{
+            "id": 55, "myAnimeListId": 900, "titles": {"ru": "Точный тайтл"},
+            "year": 2024, "typeTitle": "TV", "posterUrlSmall": "https://smotret-anime.app/posters/55.jpg",
+        }])
+        app = create_app(config, self.store, self.anime)
+        client = TestClient(app)
+        try:
+            result = client.post("/internal/recommendations/resolve", headers={"X-Recommender-Token": secret},
+                                 json={"items": [{"shikimori_anime_id": "900", "mal_id": "900"}]})
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(result.json()["items"][0]["anime365_series_id"], 55)
+            self.assertEqual(self.store.external_series_id("shikimori", "900"), 55)
+            self.anime.series_by_mal_id.assert_awaited_once_with("900")
+        finally:
+            client.close()
 
     def test_shared_config_anime365_token_serves_allowed_user_without_personal_token(self):
         self.store.add_allowed_user(7, owner_id=42)
@@ -595,7 +648,7 @@ variants/720.m3u8?signature=private
         shikimori = type("Shikimori", (), {})()
         shikimori.user_rates = AsyncMock(return_value=[{
             "id": 50, "target_id": 700, "target_type": "Anime", "status": "watching",
-            "episodes": 7, "target": {"id": 700, "russian": "Тайтл"},
+            "episodes": 7, "score": 9, "target": {"id": 700, "russian": "Тайтл"},
         }])
         shikimori.anime = AsyncMock(return_value={
             "id": 700, "russian": "Не найдено", "name": "Roman", "english": ["Тайтл"],
@@ -613,6 +666,7 @@ variants/720.m3u8?signature=private
         imported = self.client.post("/api/shikimori/import", headers=self.headers(42),
                                     json={"statuses": ["watching"]})
         self.assertEqual(imported.status_code, 200)
+        self.assertEqual(self.store.external_user_rate(42, "shikimori", "50")["score"], 9)
         self.assertEqual(imported.json()["unmatched"][0]["external_rate_id"], "50")
         self.assertEqual(imported.json()["unmatched_total"], 1)
         automatically_linked = self.client.post("/api/shikimori/imports/auto-link", headers=self.headers(42))

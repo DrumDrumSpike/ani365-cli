@@ -1,4 +1,6 @@
 {$WEB_DOMAIN} {
     encode zstd gzip
+    @recommender path /internal/*
+    respond @recommender 404
     reverse_proxy web:8000
 }

@@ -15,7 +15,7 @@
   }
   const fail = error => { root.innerHTML = `<p class="error">${esc(error.message || error)}</p>`; };
   const navItems = [
-    ['home', '⌂', 'Главная'], ['search', '⌕', 'Каталог'], ['hentai', '18+', 'Hentai365'], ['library', '▦', 'Моё'], ['downloads', '⇩', 'Загрузки'],
+    ['home', '⌂', 'Главная'], ['recommendations', '✦', 'Советы'], ['search', '⌕', 'Каталог'], ['hentai', '18+', 'Hentai365'], ['library', '▦', 'Моё'], ['downloads', '⇩', 'Загрузки'],
   ];
   function addChrome() {
     if (state.view === 'player' || root.querySelector('.app-topbar')) return;
@@ -23,7 +23,7 @@
     root.insertAdjacentHTML('beforeend', `<nav class="bottom-nav" aria-label="Основная навигация">${navItems.map(([id, icon, label]) => `<button class="${state.view === id ? 'active' : ''}" data-nav="${id}"><span>${icon}</span>${label}</button>`).join('')}</nav>`);
     root.querySelectorAll('[data-nav]').forEach(button => {
       const target = button.dataset.nav;
-      button.onclick = () => ({ home, search, hentai, library, downloads, settings }[target] || home)();
+      button.onclick = () => ({ home, recommendations, search, hentai, library, downloads, settings }[target] || home)();
     });
   }
   const chromeObserver = new MutationObserver(() => addChrome());
@@ -84,6 +84,37 @@
       search.addEventListener('input', render); render();
     } catch (error) { fail(error); }
   }
+  function recommendationCards(items) {
+    return `<section class="grid">${items.map(item => `<article class="card"><button data-recommendation="${esc(item.anime365_series_id)}">${item.poster_url ? `<img class="poster" src="${esc(item.poster_url)}" alt="" loading="lazy">` : '<div class="poster catalog-placeholder">Anime365</div>'}<strong>${esc(item.title)}</strong><div class="meta">${esc(item.year || 'Год не указан')}${item.series_type ? ` · ${esc(item.series_type)}` : ''}</div><p class="recommendation-reason">${esc(item.reason)}</p></button></article>`).join('')}</section>`;
+  }
+  async function recommendations(offset = 0, accumulated = []) {
+    try {
+      state.view = 'recommendations';
+      const data = await api(`/api/recommendations?offset=${encodeURIComponent(offset)}`);
+      const items = [...accumulated, ...(data.items || [])];
+      const updated = data.generated_at ? new Date(Number(data.generated_at) * 1000).toLocaleString('ru-RU') : '';
+      let content;
+      if (!data.connected) content = '<p class="empty">Подключите Shikimori в настройках, чтобы получать персональные рекомендации.</p>';
+      else if ((data.rated_completed || 0) < 5) content = `<p class="empty">Поставьте оценки хотя бы пяти просмотренным тайтлам в Shikimori. Сейчас: ${esc(data.rated_completed || 0)}.</p>`;
+      else if (!items.length) content = '<p class="empty">Лента готовится. Она обновляется раз в неделю после импорта Shikimori.</p>';
+      else content = `${recommendationCards(items)}${data.next_offset !== null ? '<button class="action secondary" id="more-recommendations">Показать ещё</button>' : ''}`;
+      root.innerHTML = `<section class="page-heading"><p class="eyebrow">Для вас</p><h1>Рекомендации</h1><p class="meta">${updated ? `Обновлено: ${esc(updated)}.` : 'На основе оценок и жанров Shikimori.'}</p></section>${content}<button class="action secondary back">Назад</button>`;
+      useBack(); root.querySelector('.back').onclick = home;
+      const more = root.querySelector('#more-recommendations');
+      if (more) more.onclick = () => recommendations(data.next_offset, items);
+      root.querySelectorAll('[data-recommendation]').forEach(button => button.onclick = async () => {
+        try {
+          const item = items.find(row => Number(row.anime365_series_id) === Number(button.dataset.recommendation));
+          if (!item) throw new Error('Рекомендация больше недоступна.');
+          await api('/api/library', {method:'POST', body:JSON.stringify({
+            series_id:item.anime365_series_id, title:item.title, year:item.year == null ? null : String(item.year),
+            series_type:item.series_type, provider:'anime365',
+          })});
+          await details(item.anime365_series_id);
+        } catch(error) { fail(error); }
+      });
+    } catch(error) { fail(error); }
+  }
   async function search(provider = 'anime365') {
     state.view = provider === 'hentai365' ? 'hentai' : 'search';
     const label = provider === 'hentai365' ? 'Hentai365' : 'Anime365';
@@ -102,7 +133,7 @@
   async function shikimoriImport() {
     let current;
     try { current = await api('/api/shikimori/status'); } catch(error) { fail(error); return; }
-    const selected = new Set(current.background_import?.statuses || ['watching', 'planned']);
+    const selected = new Set(current.background_import?.statuses || ['watching', 'planned', 'completed']);
     root.innerHTML = `<h1>Импорт Shikimori</h1><p class="meta">Фоновый импорт сохранит список и продолжит работу после закрытия Mini App. Ручной вариант оставлен для немедленного обновления.</p><p class="meta">Статус берётся из Shikimori, а прогресс не уменьшается: используется максимум локального и Shikimori.</p><section class="panel">${[['watching','Смотрю'],['planned','Запланировано'],['rewatching','Пересматриваю'],['completed','Просмотрено'],['on_hold','Отложено'],['dropped','Брошено']].map(([value,label]) => `<label><input type="checkbox" value="${value}" ${selected.has(value) ? 'checked' : ''}> ${label}</label><br>`).join('')}</section><p class="meta" id="import-state">${esc(backgroundImportText(current.background_import))}</p><button class="action" id="start-background-import">Импортировать в фоне</button><button class="action secondary" id="start-import">Импортировать сейчас</button><button class="action secondary back">Назад</button>`;
     useBack(); root.querySelector('.back').onclick = settings;
     root.querySelector('#start-background-import').onclick = async () => {

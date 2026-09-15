@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
     && useradd --uid 10001 --gid bot --no-create-home bot \
     && mkdir /data /jobs && chown bot:bot /data /jobs && chmod 700 /data /jobs
 COPY ani365_bot/ ani365_bot/
+COPY ani365_recommender/ ani365_recommender/
 COPY ani365-cli-master/LICENSE ./LICENSE
 LABEL org.opencontainers.image.source="https://github.com/DrumDrumSpike/ani365-cli" \
       org.opencontainers.image.licenses="GPL-3.0-or-later" \

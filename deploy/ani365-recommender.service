@@ -1,0 +1,12 @@
+[Unit]
+Description=Build weekly ani365 recommendations
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ani365-cli
+ExecStart=/usr/bin/docker compose run --rm recommender
+TimeoutStartSec=20min
+UMask=0077
