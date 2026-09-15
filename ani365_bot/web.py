@@ -47,7 +47,7 @@ BATCH_DOWNLOAD_LIMIT = 50
 SHIKIMORI_AUTO_LINK_BATCH = 50
 SHIKIMORI_IMPORT_PAGE_SIZE = 50
 SHIKIMORI_IMPORT_FOREGROUND_METADATA_BATCH = 50
-SHIKIMORI_BACKGROUND_STATUSES = ("watching", "planned", "completed")
+SHIKIMORI_BACKGROUND_STATUSES = ("watching", "planned", "completed", "dropped")
 SHIKIMORI_BACKGROUND_RETRY_SECONDS = 15 * 60
 SHIKIMORI_BACKGROUND_POLL_SECONDS = 60
 SHIKIMORI_ANIME_SLUG = re.compile(r"(?:^|/)([1-9][0-9]{0,8})-[a-z0-9-]+/?$", re.IGNORECASE)
@@ -300,7 +300,7 @@ class TravelRequest(BaseModel):
 
 
 class ShikimoriImportRequest(BaseModel):
-    statuses: list[str] = Field(default_factory=lambda: ["watching", "planned", "completed"], max_length=6)
+    statuses: list[str] = Field(default_factory=lambda: ["watching", "planned", "completed", "dropped"], max_length=6)
 
 
 class ShikimoriLinkRequest(BaseModel):
@@ -1179,7 +1179,7 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
         return {"background_import": state}
 
     @app.get("/api/shikimori/import/preview")
-    async def shikimori_import_preview(statuses: list[str] = Query(default=["watching", "planned", "completed"]),
+    async def shikimori_import_preview(statuses: list[str] = Query(default=["watching", "planned", "completed", "dropped"]),
                                        user_id=Depends(authenticated_user)):
         selected = set(statuses)
         if not selected or not selected <= SHIKIMORI_STATUSES:

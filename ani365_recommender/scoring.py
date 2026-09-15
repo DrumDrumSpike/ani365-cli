@@ -21,10 +21,23 @@ def rated_completed(profile):
             and isinstance(rate.get("score"), int) and 1 <= rate["score"] <= 10]
 
 
+def preference_rates(profile):
+    """Include dropped titles as an explicit strong negative signal.
+
+    A dropped title often has no Shikimori score at all.  Treating it as one
+    gives its genres a predictable penalty without letting it satisfy the
+    minimum amount of positive rating history.
+    """
+    result = [dict(rate) for rate in rated_completed(profile)]
+    result.extend({**rate, "score": 1} for rate in profile.get("rates", ())
+                  if rate.get("status") == "dropped")
+    return result
+
+
 def genre_taste(profile, anime_by_id):
     """Return signed genre weights; low ratings deliberately subtract affinity."""
     taste = {}
-    for rate in rated_completed(profile):
+    for rate in preference_rates(profile):
         weight = int(rate["score"]) - 5
         if weight == 0:
             continue

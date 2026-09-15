@@ -133,7 +133,7 @@
   async function shikimoriImport() {
     let current;
     try { current = await api('/api/shikimori/status'); } catch(error) { fail(error); return; }
-    const selected = new Set(current.background_import?.statuses || ['watching', 'planned', 'completed']);
+    const selected = new Set(current.background_import?.statuses || ['watching', 'planned', 'completed', 'dropped']);
     root.innerHTML = `<h1>Импорт Shikimori</h1><p class="meta">Фоновый импорт сохранит список и продолжит работу после закрытия Mini App. Ручной вариант оставлен для немедленного обновления.</p><p class="meta">Статус берётся из Shikimori, а прогресс не уменьшается: используется максимум локального и Shikimori.</p><section class="panel">${[['watching','Смотрю'],['planned','Запланировано'],['rewatching','Пересматриваю'],['completed','Просмотрено'],['on_hold','Отложено'],['dropped','Брошено']].map(([value,label]) => `<label><input type="checkbox" value="${value}" ${selected.has(value) ? 'checked' : ''}> ${label}</label><br>`).join('')}</section><p class="meta" id="import-state">${esc(backgroundImportText(current.background_import))}</p><button class="action" id="start-background-import">Импортировать в фоне</button><button class="action secondary" id="start-import">Импортировать сейчас</button><button class="action secondary back">Назад</button>`;
     useBack(); root.querySelector('.back').onclick = settings;
     root.querySelector('#start-background-import').onclick = async () => {

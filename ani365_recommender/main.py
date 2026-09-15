@@ -73,8 +73,10 @@ async def refresh(config=None, *, main_api=None, shikimori=None):
     shikimori = shikimori or ShikimoriPublic()
     profiles = [profile for profile in await main_api.profiles() if isinstance(profile, dict)]
     rated_ids = [rate.get("external_anime_id") for profile in profiles
-                 for rate in profile.get("rates", ()) if rate.get("status") == "completed"
-                 and isinstance(rate.get("score"), int) and 1 <= rate["score"] <= 10]
+                 for rate in profile.get("rates", ()) if (
+                     rate.get("status") == "dropped" or (
+                         rate.get("status") == "completed" and isinstance(rate.get("score"), int)
+                         and 1 <= rate["score"] <= 10))]
     anime_by_id = await shikimori.metadata(rated_ids)
     wanted_genres = []
     for profile in profiles:

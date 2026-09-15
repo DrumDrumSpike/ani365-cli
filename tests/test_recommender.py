@@ -12,7 +12,7 @@ def profile():
         {"external_anime_id": "3", "status": "completed", "score": 8},
         {"external_anime_id": "4", "status": "completed", "score": 7},
         {"external_anime_id": "5", "status": "completed", "score": 2},
-        {"external_anime_id": "6", "status": "planned", "score": 10},
+        {"external_anime_id": "6", "status": "dropped", "score": None},
     ]}
 
 
@@ -23,6 +23,7 @@ def metadata():
         "3": {"genres": [{"id": "20", "name": "Fantasy"}]},
         "4": {"genres": [{"id": "10", "name": "Drama"}]},
         "5": {"genres": [{"id": "30", "name": "Comedy"}]},
+        "6": {"genres": [{"id": "40", "name": "Horror"}]},
     }
 
 
@@ -30,16 +31,19 @@ class RecommendationScoringTests(unittest.TestCase):
     def test_scores_liked_genres_excludes_existing_titles_and_explains_result(self):
         taste = genre_taste(profile(), metadata())
         self.assertEqual(top_genres(taste), ["10", "20"])
+        self.assertEqual(taste["40"]["weight"], -4)
         candidates = [
             {"id": "1", "score": 9, "genres": [{"id": "10", "name": "Drama"}]},
             {"id": "7", "score": 8, "genres": [{"id": "10", "name": "Drama"}]},
             {"id": "8", "score": 10, "genres": [{"id": "30", "name": "Comedy"}]},
+            {"id": "10", "score": 10, "genres": [{"id": "40", "name": "Horror"}]},
             {"id": "9", "score": 9, "genres": [{"id": "20", "name": "Fantasy"}]},
         ]
         resolved = [
             {"shikimori_anime_id": "7", "anime365_series_id": 77, "title": "Drama pick"},
             {"shikimori_anime_id": "8", "anime365_series_id": 88, "title": "Comedy pick"},
             {"shikimori_anime_id": "9", "anime365_series_id": 44, "title": "Already saved"},
+            {"shikimori_anime_id": "10", "anime365_series_id": 100, "title": "Dropped genre"},
         ]
         result = rank(profile(), metadata(), candidates, resolved)
         self.assertEqual([item["anime365_series_id"] for item in result], [77])
