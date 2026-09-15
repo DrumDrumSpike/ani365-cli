@@ -713,6 +713,31 @@ variants/720.m3u8?signature=private
         self.store.add_allowed_user(7, owner_id=42)
         self.assertNotIn("poster_url", self.client.get("/api/library", headers=self.headers(7)).json()["items"])
 
+    def test_library_uses_shared_mal_cover_for_confirmed_mapping(self):
+        self.store.add_watchlist(42, 55, "Title")
+        self.store.save_external_id(55, "mal", "501")
+        self.store.add_allowed_user(7, owner_id=42)
+        self.store.add_watchlist(7, 55, "Same title")
+        mal = type("MyAnimeList", (), {})()
+        mal.configured = True
+        mal.anime = AsyncMock(return_value={
+            "title": "Shared MAL title",
+            "poster_url": "https://cdn.myanimelist.net/images/anime/1/cover.jpg",
+            "kind": "tv", "aired_on": "2026-01-01",
+        })
+        app = create_app(self.config, self.store, self.anime, mal=mal)
+        client = TestClient(app)
+        try:
+            owner = client.get("/api/library", headers=self.headers(42))
+            other = client.get("/api/library", headers=self.headers(7))
+        finally:
+            client.close()
+        self.assertEqual(owner.json()["items"][0]["poster_url"],
+                         "https://cdn.myanimelist.net/images/anime/1/cover.jpg")
+        self.assertEqual(other.json()["items"][0]["poster_url"],
+                         "https://cdn.myanimelist.net/images/anime/1/cover.jpg")
+        mal.anime.assert_awaited_once_with("501")
+
     def test_shikimori_import_reuses_shared_metadata_for_another_user(self):
         self.store.add_allowed_user(7, owner_id=42)
         self.store.save_external_account(7, "shikimori", "access", "refresh", time.time() + 3600, "7000")

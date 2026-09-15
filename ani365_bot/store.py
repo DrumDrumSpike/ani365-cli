@@ -700,6 +700,23 @@ class Store:
         """, (str(provider).strip(), str(external_id).strip())).fetchone()
         return int(row[0]) if row else None
 
+    def external_ids_for_series(self, provider, series_ids):
+        """Return provider IDs only for already-confirmed global mappings."""
+        ids = list(dict.fromkeys(
+            int(value) for value in series_ids if isinstance(value, int) or str(value).isdigit()))
+        result = {}
+        for offset in range(0, len(ids), 900):
+            batch = ids[offset:offset + 900]
+            if not batch:
+                continue
+            placeholders = ", ".join("?" for _ in batch)
+            rows = self.db.execute(f"""
+                SELECT anime365_series_id, external_id FROM anime_external_ids
+                WHERE provider=? AND anime365_series_id IN ({placeholders})
+            """, (str(provider).strip(), *batch)).fetchall()
+            result.update({int(row[0]): str(row[1]) for row in rows})
+        return result
+
     def save_external_anime_metadata(self, provider, external_id, *, title=None, poster_url=None,
                                      kind=None, aired_on=None, now=None):
         provider, external_id = str(provider).strip(), str(external_id).strip()

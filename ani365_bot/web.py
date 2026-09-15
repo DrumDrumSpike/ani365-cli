@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from .api import APIError, Anime365, number, title
 from .downloads import DownloadManager
 from .http import HTTPClient
+from .mal import MyAnimeList, MyAnimeListError
 from .media import MAX_SUBTITLE_FILE, MediaError, _run
 from .matching import rank_anime365_candidates, shikimori_titles
 from .shikimori import Shikimori, ShikimoriError
@@ -359,6 +360,9 @@ SHIKIMORI_STATUSES = {"planned", "watching", "rewatching", "completed", "on_hold
 SHIKIMORI_METADATA_BACKFILL_BATCH = 50
 SHIKIMORI_METADATA_RETRY_SECONDS = 300
 SHIKIMORI_METADATA_REFRESH_SECONDS = 3600
+MAL_METADATA_BACKFILL_BATCH = 3
+MAL_METADATA_RETRY_SECONDS = 15 * 60
+MAL_METADATA_REFRESH_SECONDS = 7 * 24 * 60 * 60
 
 
 def _shikimori_title(rate, anime=None):
@@ -451,7 +455,7 @@ async def _shikimori_candidates(anime_client, shikimori_client, rate):
         external, rows, fallback_title=rate["title"], fallback_mal_id=rate["external_anime_id"])
 
 
-def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transport=None):
+def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, proxy_transport=None):
     """Create an app with injectable dependencies for isolated integration tests."""
     if config is None:
         from .config import Config
@@ -464,11 +468,14 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
         anime = Anime365(HTTPClient(), config.anime_url)
     if hentai is None and config.hentai_url:
         hentai = Anime365(HTTPClient(), config.hentai_url)
+    if mal is None:
+        mal = MyAnimeList(config.mal_client_id)
 
     app = FastAPI(title="ani365 Mini App", docs_url=None, redoc_url=None)
     app.state.store = store
     app.state.anime = anime
     app.state.hentai = hentai
+    app.state.mal = mal
     app.state.tickets = EphemeralTickets()
     app.state.subtitle_tickets = EphemeralTickets()
     app.state.poster_tickets = EphemeralTickets()
@@ -529,6 +536,10 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
     app.state.shikimori = Shikimori(config.shikimori_client_id, config.shikimori_client_secret,
                                     config.shikimori_redirect_uri)
     app.state.shikimori_metadata_refresh_after = {}
+    app.state.mal_metadata_refresh_after = {}
+    app.state.mal_discovery_refresh_after = {}
+    app.state.mal_discovery_tasks = {}
+    app.state.mal_discovery_semaphore = asyncio.Semaphore(1)
     app.state.shikimori_import_tasks = {}
     app.state.shikimori_background_import_tasks = {}
     app.state.shikimori_background_semaphore = asyncio.Semaphore(1)
@@ -556,6 +567,88 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
         if not token:
             raise HTTPException(409, "Anime365 token is not configured on the server.")
         return token
+
+    def library_metadata(user_id, series_ids):
+        """Merge private Shikimori status with shared, verified public covers."""
+        shikimori_metadata = store.shikimori_library_metadata(user_id)
+        mal_metadata = store.external_anime_metadata_for_series("mal", series_ids)
+        result = {}
+        for series_id in series_ids:
+            value = dict(shikimori_metadata.get(series_id, {}))
+            mal_value = mal_metadata.get(series_id, {})
+            # The MAL mapping exists only after Anime365 confirmed its own
+            # myAnimeListId, so its public cover can be reused by every user.
+            if mal_value.get("poster_url"):
+                value["poster_url"] = mal_value["poster_url"]
+            result[series_id] = value
+        return result
+
+    async def cache_mal_metadata(mal_id, *, force=False):
+        """Cache one public MAL record. It contains neither user data nor tokens."""
+        cached = store.external_anime_metadata("mal", mal_id)
+        if not force and cached and cached.get("poster_url"):
+            return cached
+        public = await app.state.mal.anime(mal_id)
+        store.save_external_anime_metadata(
+            "mal", str(mal_id), title=public.get("title"), poster_url=public.get("poster_url"),
+            kind=public.get("kind"), aired_on=public.get("aired_on"))
+        return store.external_anime_metadata("mal", mal_id)
+
+    async def backfill_mal_metadata(series_ids):
+        """Warm a small shared MAL cover cache without blocking on every card."""
+        if not getattr(app.state.mal, "configured", False):
+            return
+        mappings = store.external_ids_for_series("mal", series_ids)
+        cached = store.external_anime_metadata_many("mal", mappings.values())
+        now, pending = time.time(), []
+        for _series_id, mal_id in mappings.items():
+            metadata = cached.get(mal_id)
+            fresh = metadata and metadata.get("poster_url") and \
+                now - float(metadata.get("updated_at") or 0) < MAL_METADATA_REFRESH_SECONDS
+            if not fresh and app.state.mal_metadata_refresh_after.get(mal_id, 0) <= now:
+                pending.append(mal_id)
+        for mal_id in pending[:MAL_METADATA_BACKFILL_BATCH]:
+            app.state.mal_metadata_refresh_after[mal_id] = now + MAL_METADATA_RETRY_SECONDS
+            try:
+                await cache_mal_metadata(mal_id, force=True)
+            except MyAnimeListError:
+                LOG.info("MyAnimeList metadata backfill unavailable (mal_id=%s)", mal_id)
+            else:
+                app.state.mal_metadata_refresh_after[mal_id] = now + MAL_METADATA_REFRESH_SECONDS
+
+    async def discover_mal_mapping(series_id, lookup_title):
+        """Accept a MAL ID only from an Anime365 row with the same series ID."""
+        if not getattr(app.state.mal, "configured", False):
+            return
+        try:
+            async with app.state.mal_discovery_semaphore:
+                existing = store.external_ids_for_series("mal", [series_id]).get(series_id)
+                if existing:
+                    await cache_mal_metadata(existing)
+                    return
+                rows = await anime.search(lookup_title)
+                row = next((item for item in rows if int(item.get("id", 0) or 0) == int(series_id)), None)
+                mal_id = str((row or {}).get("myAnimeListId") or "").strip()
+                if not mal_id.isdigit() or int(mal_id) <= 0:
+                    return
+                store.save_external_id(series_id, "mal", mal_id)
+                await cache_mal_metadata(mal_id)
+        except (APIError, MyAnimeListError, TypeError, ValueError):
+            LOG.info("MyAnimeList mapping refresh skipped (series=%s)", series_id)
+
+    def schedule_mal_discovery(series_id, lookup_title):
+        if not getattr(app.state.mal, "configured", False):
+            return
+        now = time.time()
+        if app.state.mal_discovery_refresh_after.get(series_id, 0) > now:
+            return
+        current = app.state.mal_discovery_tasks.get(series_id)
+        if current and not current.done():
+            return
+        app.state.mal_discovery_refresh_after[series_id] = now + MAL_METADATA_RETRY_SECONDS
+        task = asyncio.create_task(discover_mal_mapping(series_id, lookup_title))
+        app.state.mal_discovery_tasks[series_id] = task
+        task.add_done_callback(lambda _: app.state.mal_discovery_tasks.pop(series_id, None))
 
     async def shikimori_account(user_id):
         account = store.external_account(user_id, "shikimori")
@@ -857,6 +950,10 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
             task.cancel()
         if app.state.shikimori_background_import_tasks:
             await asyncio.gather(*app.state.shikimori_background_import_tasks.values(), return_exceptions=True)
+        for task in app.state.mal_discovery_tasks.values():
+            task.cancel()
+        if app.state.mal_discovery_tasks:
+            await asyncio.gather(*app.state.mal_discovery_tasks.values(), return_exceptions=True)
         await app.state.downloads.stop()
         if owns_store:
             store.close()
@@ -1142,8 +1239,18 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
     @app.get("/api/library")
     async def library(user_id=Depends(authenticated_user)):
         await backfill_shikimori_metadata(user_id)
-        metadata = store.shikimori_library_metadata(user_id)
         watched = store.list_watchlist(user_id)
+        anime_series_ids = [item["series_id"] for item in watched if not is_hentai_series(item["series_id"])]
+        known_mal = store.external_ids_for_series("mal", anime_series_ids)
+        # Older local cards predate the MAL mapping. Resolve only a few in the
+        # background and accept a result solely when Anime365 returns the same
+        # series ID, so opening a large library stays responsive and safe.
+        missing_mal = [item for item in watched if not is_hentai_series(item["series_id"])
+                       and item["series_id"] not in known_mal]
+        for item in missing_mal[:MAL_METADATA_BACKFILL_BATCH]:
+            schedule_mal_discovery(item["series_id"], item["title"])
+        await backfill_mal_metadata(anime_series_ids)
+        metadata = library_metadata(user_id, anime_series_ids)
         hentai_metadata = store.external_anime_metadata_many(
             "hentai365", [int(item["series_id"]) - HENTAI_SERIES_OFFSET for item in watched
                           if is_hentai_series(item["series_id"])])
@@ -1185,8 +1292,11 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
             source_for_series(payload.series_id)
         elif is_hentai_series(payload.series_id):
             raise HTTPException(422, "Некорректный источник каталога.")
-        return store.add_watchlist(user_id, payload.series_id, payload.title, payload.year,
+        item = store.add_watchlist(user_id, payload.series_id, payload.title, payload.year,
                                    payload.series_type)
+        if payload.provider == "anime365":
+            schedule_mal_discovery(payload.series_id, payload.title)
+        return item
 
     @app.delete("/api/library/{series_id}")
     async def delete_library(series_id: int, user_id=Depends(authenticated_user)):
@@ -1317,6 +1427,8 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
             _api_error(exc)
         metadata = store.external_anime_metadata_for_series(
             "shikimori", [int(row["id"]) for row in rows if str(row.get("id", "")).isdigit()])
+        mal_metadata = store.external_anime_metadata_many(
+            "mal", [str(row.get("myAnimeListId") or "") for row in rows])
         # Anime365 search intentionally requests only its stable catalogue
         # fields.  A public Shikimori cover is used only when a confirmed global
         # mapping already exists; searching must not create one API request per
@@ -1335,7 +1447,9 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
         return {"items": [{
             "series_id": int(row["id"]), "title": title(row),
             "year": row.get("year"), "series_type": row.get("typeTitle") or row.get("type"),
-            "poster_url": anime365_poster(row) or metadata.get(int(row["id"]), {}).get("poster_url"),
+            "poster_url": anime365_poster(row)
+                          or mal_metadata.get(str(row.get("myAnimeListId") or ""), {}).get("poster_url")
+                          or metadata.get(int(row["id"]), {}).get("poster_url"),
         } for row in rows if str(row.get("id", "")).isdigit()]}
 
     @app.get("/api/hentai/catalog")
@@ -1368,11 +1482,14 @@ def create_app(config=None, store=None, anime=None, hentai=None, *, proxy_transp
         item = store.get_watchlist(user_id, series_id)
         if item is None:
             raise HTTPException(404, "Anime is not in your library.")
+        if not is_hentai_series(series_id):
+            schedule_mal_discovery(series_id, item["title"])
+            await backfill_mal_metadata([series_id])
         item = {**source_item(item), **(
                 {"poster_url": (store.external_anime_metadata(
                     "hentai365", int(series_id) - HENTAI_SERIES_OFFSET) or {}).get("poster_url")}
                 if is_hentai_series(series_id)
-                else store.shikimori_library_metadata(user_id).get(series_id, {}))}
+                else library_metadata(user_id, [series_id]).get(series_id, {}))}
         if is_hentai_series(series_id):
             item["poster_url"] = poster_proxy_url(user_id, item.get("poster_url"))
         try:

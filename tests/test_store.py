@@ -227,6 +227,13 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.external_user_rate(1, "shikimori", "101")["status"], "completed")
         self.assertFalse(self.store.update_external_rate_status(2, "shikimori", "101", "watching"))
 
+    def test_confirmed_external_ids_can_be_read_for_shared_metadata_cache(self):
+        self.store.save_external_id(10, "mal", "501")
+        self.store.save_external_id(11, "mal", "502")
+        self.assertEqual(self.store.external_ids_for_series("mal", [10, 11, 12]), {
+            10: "501", 11: "502",
+        })
+
     def test_external_rates_are_paginated_without_cross_user_count(self):
         rates = [{"external_rate_id": str(index), "external_anime_id": str(100 + index),
                   "status": "planned", "episodes": 0, "title": f"Title {index}"}

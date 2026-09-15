@@ -29,6 +29,7 @@ class Config:
     anime_token: str = ""
     hentai_url: str = ""
     hentai_token: str = ""
+    mal_client_id: str = ""
 
     @classmethod
     def from_env(cls):
@@ -62,6 +63,9 @@ class Config:
         if bool(hentai_url) != bool(hentai_token) or (hentai_token and (
                 len(hentai_token) > 4096 or any(char.isspace() for char in hentai_token))):
             raise ConfigError("Set both HENTAI_BASE_URL and HENTAI_TOKEN, or neither")
+        mal_client_id = os.environ.get("MAL_CLIENT_ID", "").strip()
+        if len(mal_client_id) > 512 or any(char.isspace() for char in mal_client_id):
+            raise ConfigError("MAL_CLIENT_ID must be a single client identifier")
         telegram_url = os.environ.get("TELEGRAM_BOT_API_URL", cls.telegram_url).rstrip("/")
         telegram = urlsplit(telegram_url)
         if (telegram.scheme not in ("http", "https") or not telegram.hostname or telegram.username
@@ -118,4 +122,4 @@ class Config:
                    telegram_url, Path(os.environ.get("MEDIA_DIR", "/jobs")), watch_check_interval,
                    mini_app_url, cookie_secure in ("1", "true", "yes"), completion_threshold,
                    download_workers, download_ttl, shikimori_id, shikimori_secret, shikimori_redirect,
-                   shikimori_import_interval, anime_token, hentai_url, hentai_token)
+                   shikimori_import_interval, anime_token, hentai_url, hentai_token, mal_client_id)

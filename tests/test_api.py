@@ -168,6 +168,16 @@ class ShapeTests(unittest.TestCase):
         self.assertEqual(cfg.owner_id, 42)
         self.assertEqual(cfg.bot_token, "fake:token")
 
+    def test_optional_mal_metadata_client_id_is_validated(self):
+        values = {"BOT_TOKEN": "fake:token", "OWNER_ID": "42", "ANI365_TOKEN": "shared-token",
+                  "MAL_CLIENT_ID": "public-client-id"}
+        with patch.dict(os.environ, values, clear=True):
+            self.assertEqual(Config.from_env().mal_client_id, "public-client-id")
+        values["MAL_CLIENT_ID"] = "not a client id"
+        with patch.dict(os.environ, values, clear=True):
+            with self.assertRaises(ValueError):
+                Config.from_env()
+
     def test_watch_check_interval_is_configurable_and_positive(self):
         with patch.dict(os.environ, {"BOT_TOKEN": "fake:token", "OWNER_ID": "42",
                                     "WATCH_CHECK_INTERVAL": "17", "ANI365_TOKEN": "shared-token"}, clear=True):
