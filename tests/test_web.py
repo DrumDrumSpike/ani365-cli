@@ -554,6 +554,16 @@ variants/720.m3u8?signature=private
         self.assertEqual(hero.headers["cache-control"], "no-store, max-age=0")
         self.assertEqual(self.client.get("/assets/../web.py").status_code, 404)
 
+    def test_player_asset_uses_telegram_and_webview_fullscreen_fallbacks(self):
+        script = self.client.get("/assets/app.js").text
+        self.assertIn('id="fullscreen"', script)
+        self.assertIn("telegram.requestFullscreen", script)
+        self.assertIn("video.requestFullscreen", script)
+        self.assertIn("video.webkitRequestFullscreen", script)
+        self.assertIn("video.webkitEnterFullscreen", script)
+        self.assertIn("fullscreenFailed", script)
+        self.assertIn(".miniapp-fullscreen .player-page video", self.client.get("/assets/app.css").text)
+
     def test_background_shikimori_import_is_owner_bound_and_durable(self):
         self.store.save_external_account(42, "shikimori", "access", "refresh", time.time() + 3600, "123")
         shikimori = type("Shikimori", (), {})()
