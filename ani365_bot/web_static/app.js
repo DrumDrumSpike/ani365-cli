@@ -17,9 +17,32 @@
   const navItems = [
     ['home', '⌂', 'Главная'], ['recommendations', '✦', 'Советы'], ['search', '⌕', 'Каталог'], ['hentai', '18+', 'Hentai365'], ['library', '▦', 'Моё'], ['downloads', '⇩', 'Загрузки'],
   ];
+  function updateAppFullscreen() {
+    const active = Boolean(telegram?.isFullscreen || document.fullscreenElement);
+    document.body.classList.toggle('app-fullscreen', active);
+    const button = root.querySelector('#app-fullscreen');
+    if (button) {
+      button.textContent = active ? 'Обычный режим' : 'Во весь экран';
+      button.setAttribute('aria-label', button.textContent);
+    }
+  }
+  document.addEventListener('fullscreenchange', updateAppFullscreen);
+  telegram?.onEvent?.('fullscreenChanged', updateAppFullscreen);
   function addChrome() {
     if (state.view === 'player' || root.querySelector('.app-topbar')) return;
-    root.insertAdjacentHTML('afterbegin', `<header class="app-topbar"><button class="brand" data-nav="home" aria-label="На главную"><span class="brand-mark">▶</span><span>ani<b>365</b></span></button><button class="top-settings" data-nav="settings" aria-label="Настройки">⚙</button></header>`);
+    root.insertAdjacentHTML('afterbegin', `<header class="app-topbar"><button class="brand" data-nav="home" aria-label="На главную"><span class="brand-mark">▶</span><span>ani<b>365</b></span></button><div class="top-actions"><button class="top-fullscreen" id="app-fullscreen">Во весь экран</button><button class="top-settings" data-nav="settings" aria-label="Настройки">⚙</button></div></header>`);
+    const fullscreenButton = root.querySelector('#app-fullscreen');
+    fullscreenButton.onclick = async () => {
+      try {
+        if (telegram?.isFullscreen) telegram.exitFullscreen?.();
+        else if (document.fullscreenElement) await document.exitFullscreen();
+        else if (telegram?.requestFullscreen) telegram.requestFullscreen();
+        else if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen();
+        else fullscreenButton.title = 'Полный экран недоступен в этом окне';
+      } catch (_) { fullscreenButton.title = 'Полный экран недоступен в этом окне'; }
+      updateAppFullscreen();
+    };
+    updateAppFullscreen();
     root.insertAdjacentHTML('beforeend', `<nav class="bottom-nav" aria-label="Основная навигация">${navItems.map(([id, icon, label]) => `<button class="${state.view === id ? 'active' : ''}" data-nav="${id}"><span>${icon}</span>${label}</button>`).join('')}</nav>`);
     root.querySelectorAll('[data-nav]').forEach(button => {
       const target = button.dataset.nav;
