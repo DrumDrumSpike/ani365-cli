@@ -56,3 +56,13 @@ video { display: block; width: 100%; max-height: 75vh; border-radius: 18px; back
 @media (min-width: 620px) { #app { padding-right: 28px; padding-left: 28px; }.grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 28px 16px; }.hero-copy { min-height: 390px; padding: 38px; }.continue-hero { min-height: 390px; }.bottom-nav { border-right: 1px solid var(--line); border-left: 1px solid var(--line); border-radius: 20px 20px 0 0; } }
 @media (min-width: 900px) { .grid { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
 @media (max-width: 370px) { #app { padding-right: 12px; padding-left: 12px; }.title-header { display: block; }.detail-poster { display: block; margin: 0 auto 14px; }.bottom-nav { font-size: 10px; } }
+
+/* Native fullscreen must override the inline video height limit. */
+.player-page video:fullscreen { width: 100vw; height: 100vh; max-height: none; border-radius: 0; object-fit: contain; }
+.player-page video:-webkit-full-screen { width: 100vw; height: 100vh; max-height: none; border-radius: 0; object-fit: contain; }
+.player-expanded { overflow: hidden; }
+.player-expanded .player-page { position: fixed; inset: 0; z-index: 1000; background: #000; }
+.player-expanded .player-page video { width: 100%; height: 100%; max-height: none; border-radius: 0; object-fit: contain; }
+.player-expanded .player-page > :not(video) { display: none; }
+.player-expanded .player-page > p:has(#fullscreen) { display: block; position: absolute; top: 12px; right: 12px; margin: 0; }
+.player-expanded #fallback { display: none; }
