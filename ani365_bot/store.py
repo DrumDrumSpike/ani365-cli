@@ -7,7 +7,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 class StateError(ValueError):
@@ -131,6 +131,20 @@ class Store:
             with self.db:
                 self._create_v12()
                 self.db.execute("PRAGMA user_version = 12")
+
+        if version < 13:
+            with self.db:
+                self.db.execute("CREATE TABLE IF NOT EXISTS seasonal_catalog (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL)")
+                self.db.execute("PRAGMA user_version = 13")
+
+    def seasonal_snapshot(self):
+        row = self.db.execute("SELECT payload FROM seasonal_catalog WHERE id=1").fetchone()
+        return json.loads(row[0]) if row else None
+
+    def save_seasonal_snapshot(self, snapshot):
+        with self.db:
+            self.db.execute("INSERT INTO seasonal_catalog(id,payload) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+                            (json.dumps(snapshot, ensure_ascii=False),))
 
     def _create_v1(self):
         """Initial schema, kept idempotent for pre-versioned installations."""

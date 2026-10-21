@@ -64,6 +64,15 @@ class WebTests(unittest.TestCase):
     def headers(user_id):
         return {"X-Telegram-Init-Data": init_data(user_id)}
 
+    def test_seasonal_requires_auth_and_returns_shared_snapshot(self):
+        self.assertEqual(self.client.get('/api/seasonal').status_code, 401)
+        snapshot = {'season': 'fall_2026', 'items': [{'series_id': 20}],
+                    'updated_at': 123, 'stale': False}
+        with patch.object(self.app.state.seasonal, 'snapshot', return_value=snapshot):
+            response = self.client.get('/api/seasonal', headers=self.headers(42))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {**snapshot, 'refreshing': False})
+
     def test_init_data_validation_rejects_tampering_and_expiry(self):
         self.assertEqual(validate_init_data(init_data(42), BOT_TOKEN), 42)
         with self.assertRaises(ValueError):

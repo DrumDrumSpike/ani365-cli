@@ -31,6 +31,7 @@ from .mal import MyAnimeList, MyAnimeListError
 from .media import MAX_SUBTITLE_FILE, MediaError, _run
 from .matching import rank_anime365_candidates, shikimori_titles
 from .shikimori import Shikimori, ShikimoriError
+from .seasonal import SeasonalCatalog
 from .translations import group_translations, viewing_type
 
 
@@ -564,6 +565,8 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
     app.state.proxy_transport = proxy_transport
     app.state.shikimori = Shikimori(config.shikimori_client_id, config.shikimori_client_secret,
                                     config.shikimori_redirect_uri)
+    app.state.seasonal = SeasonalCatalog(store, app.state.shikimori, anime)
+    app.state.seasonal_task = None
     app.state.shikimori_metadata_refresh_after = {}
     app.state.mal_metadata_refresh_after = {}
     app.state.mal_discovery_refresh_after = {}
@@ -977,6 +980,9 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
 
     @app.on_event("shutdown")
     async def shutdown():
+        if app.state.seasonal_task:
+            app.state.seasonal_task.cancel()
+            await asyncio.gather(app.state.seasonal_task, return_exceptions=True)
         scheduler = app.state.shikimori_scheduler_task
         if scheduler:
             scheduler.cancel()
@@ -1000,6 +1006,7 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
     @app.on_event("startup")
     async def startup():
         await app.state.downloads.start()
+        app.state.seasonal_task = asyncio.create_task(app.state.seasonal.run())
         app.state.shikimori_scheduler_task = asyncio.create_task(shikimori_background_scheduler())
 
     @app.get("/health")
@@ -1101,6 +1108,11 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
                             max_age=SESSION_MAX_AGE, httponly=True, secure=config.web_cookie_secure,
                             samesite="strict", path="/")
         return {"user_id": user_id, "anime365_connected": bool(config.anime_token)}
+
+    @app.get("/api/seasonal")
+    async def seasonal(user_id=Depends(authenticated_user)):
+        snapshot = app.state.seasonal.snapshot()
+        return {**snapshot, "refreshing": app.state.seasonal.lock.locked()}
 
     @app.get("/api/recommendations")
     async def recommendations(offset: int = Query(default=0, ge=0),

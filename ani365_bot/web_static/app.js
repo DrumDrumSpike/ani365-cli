@@ -15,7 +15,7 @@
   }
   const fail = error => { root.innerHTML = `<p class="error">${esc(error.message || error)}</p>`; };
   const navItems = [
-    ['home', '⌂', 'Главная'], ['recommendations', '✦', 'Советы'], ['search', '⌕', 'Каталог'], ['hentai', '18+', 'Hentai365'], ['library', '▦', 'Моё'], ['downloads', '⇩', 'Загрузки'],
+    ['home', '⌂', 'Главная'], ['seasonal', '✧', 'Новинки'], ['recommendations', '✦', 'Советы'], ['search', '⌕', 'Каталог'], ['hentai', '18+', 'Hentai365'], ['library', '▦', 'Моё'], ['downloads', '⇩', 'Загрузки'],
   ];
   function updateAppFullscreen() {
     const active = Boolean(telegram?.isFullscreen || document.fullscreenElement);
@@ -46,7 +46,7 @@
     root.insertAdjacentHTML('beforeend', `<nav class="bottom-nav" aria-label="Основная навигация">${navItems.map(([id, icon, label]) => `<button class="${state.view === id ? 'active' : ''}" data-nav="${id}"><span>${icon}</span>${label}</button>`).join('')}</nav>`);
     root.querySelectorAll('[data-nav]').forEach(button => {
       const target = button.dataset.nav;
-      button.onclick = () => ({ home, recommendations, search, hentai, library, downloads, settings }[target] || home)();
+      button.onclick = () => ({ home, seasonal, recommendations, search, hentai, library, downloads, settings }[target] || home)();
     });
   }
   const chromeObserver = new MutationObserver(() => addChrome());
@@ -109,6 +109,35 @@
   }
   function recommendationCards(items) {
     return `<section class="grid">${items.map(item => `<article class="card"><button data-recommendation="${esc(item.anime365_series_id)}">${item.poster_url ? `<img class="poster" src="${esc(item.poster_url)}" alt="" loading="lazy">` : '<div class="poster catalog-placeholder">Anime365</div>'}<strong>${esc(item.title)}</strong><div class="meta">${esc(item.year || 'Год не указан')}${item.series_type ? ` · ${esc(item.series_type)}` : ''}</div><p class="recommendation-reason">${esc(item.reason)}</p></button></article>`).join('')}</section>`;
+  }
+  let seasonalTimer;
+  async function seasonal() {
+    clearTimeout(seasonalTimer);
+    state.view = 'seasonal';
+    root.innerHTML = '<p class="status">Загружаем новинки сезона…</p>';
+    try {
+      const data = await api('/api/seasonal');
+      if (state.view !== 'seasonal') return;
+      const [season, year] = data.season.split('_');
+      const label = {winter:'Зима', spring:'Весна', summer:'Лето', fall:'Осень'}[season];
+      const items = data.items || [];
+      const updated = data.updated_at ? new Date(data.updated_at * 1000).toLocaleString('ru-RU') : '';
+      root.innerHTML = `<section class="page-heading"><p class="eyebrow">${esc(label)} ${esc(year)}</p><h1>Новинки сезона</h1><p class="meta">Свежие сезоны, которые сейчас выходят и доступны с русским переводом.</p>${updated ? `<p class="meta">Обновлено: ${esc(updated)}${data.stale ? '. Обновление задерживается.' : ''}</p>` : ''}</section>${items.length ? `<section class="grid">${items.map(item => `<article class="card"><button data-seasonal="${esc(item.series_id)}">${item.poster_url ? `<img class="poster" src="${esc(item.poster_url)}" alt="" loading="lazy">` : '<div class="poster catalog-placeholder">Anime365</div>'}<strong>${esc(item.title)}</strong><div class="meta">${Number(item.score) > 0 ? `★ ${esc(item.score)} · ` : ''}Доступно серий: ${esc(item.available_episodes)}</div><span class="text-link">Смотреть ›</span></button></article>`).join('')}</section>` : `<p class="empty">${data.updated_at ? 'Пока нет выходящих новинок с русским переводом.' : data.refreshing ? 'Собираем новинки сезона. Список появится автоматически.' : 'Не удалось загрузить новинки. Повторим обновление позже.'}</p>`}<button class="action secondary" id="reload-seasonal">Обновить страницу</button><button class="action secondary back">Назад</button>`;
+      useBack(); root.querySelector('.back').onclick = home;
+      root.querySelector('#reload-seasonal').onclick = seasonal;
+      root.querySelectorAll('[data-seasonal]').forEach(button => button.onclick = async () => {
+        try {
+          button.disabled = true;
+          const item = items.find(row => Number(row.series_id) === Number(button.dataset.seasonal));
+          await api('/api/library', {method:'POST', body:JSON.stringify({
+            series_id:item.series_id, title:item.title, year:item.year == null ? null : String(item.year),
+            series_type:item.series_type, provider:'anime365',
+          })});
+          await details(item.series_id);
+        } catch(error) { button.disabled = false; fail(error); }
+      });
+      if (data.refreshing) seasonalTimer = setTimeout(() => { if (state.view === 'seasonal') seasonal(); }, 5000);
+    } catch(error) { if (state.view === 'seasonal') fail(error); }
   }
   async function recommendations(offset = 0, accumulated = []) {
     try {

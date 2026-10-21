@@ -135,6 +135,44 @@ class Shikimori:
             raise ShikimoriError("Shikimori вернул неполные данные аниме.")
         return payload
 
+    async def seasonal_animes(self, season):
+        """Discover current-season TV/ONA/OVA premieres in popularity order."""
+        query = """query Seasonal($season: SeasonString!, $page: Int!) {
+          animes(season: $season, page: $page, limit: 50, status: "ongoing",
+                 kind: "tv,ona,ova", order: popularity, censored: true) {
+            id malId russian score status airedOn { date } poster { previewUrl }
+          }
+        }"""
+        result = []
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                for page in range(1, 21):
+                    response = await client.post(self.graphql_url, json={
+                        "query": query, "variables": {"season": season, "page": page}},
+                        headers={"User-Agent": self.app_name, "Accept": "application/json"})
+                    response.raise_for_status()
+                    payload = response.json()
+                    if payload.get("errors"):
+                        raise ValueError
+                    rows = payload["data"]["animes"]
+                    if not isinstance(rows, list):
+                        raise ValueError
+                    # Verify premiere locally too: never admit long-running carryovers.
+                    season_name, year = season.split("_")
+                    start_month = {"winter": 1, "spring": 4, "summer": 7, "fall": 10}[season_name]
+                    for row in rows:
+                        date = str((row.get("airedOn") or {}).get("date") or "")
+                        if (len(date) >= 7 and date[:4] == year
+                                and start_month <= int(date[5:7]) < start_month + 3
+                                and row.get("status") == "ongoing"):
+                            result.append(row)
+                    if len(rows) < 50:
+                        return result
+                    await asyncio.sleep(self.anime_batch_delay)
+                raise ValueError
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            raise ShikimoriError("Не удалось обновить новинки сезона.") from None
+
     async def posters(self, anime_ids):
         """Read current public poster URLs from GraphQL in bounded batches.
 

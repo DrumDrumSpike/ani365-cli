@@ -305,6 +305,10 @@ class Anime365:
                                   fields="id,episodeFull,episodeInt,episodeTitle,episodeType")
         return sorted(rows, key=lambda x: (str(x.get("episodeType") or "tv"), number(x.get("episodeInt"))))
 
+    async def series_translations(self, series_id):
+        return await self.listing("translations", seriesId=series_id, isActive=1,
+                                  fields="id,episodeId,type,typeKind,typeLang")
+
     async def translations(self, episode_id):
         rows = await self.listing("translations", episodeId=episode_id, isActive=1,
                                   fields="id,title,type,typeKind,typeLang,authorsSummary,priority,height")
