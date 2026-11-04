@@ -1020,7 +1020,9 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
 
     @app.get("/assets/{asset_name}")
     async def assets(asset_name: str):
-        allowed = {"app.js", "app.css", "anime-night.webp", "hls-1.7.3.min.js"}
+        allowed = {"app.js", "app.css", "anime-night.webp", "hls-1.7.3.min.js", "subtitles-octopus.js",
+                   "subtitles-octopus-worker.js", "subtitles-octopus-worker-legacy.js",
+                   "subtitles-octopus-worker.wasm", "LiberationSans-Regular.ttf"}
         if asset_name not in allowed:
             raise HTTPException(404, "Not found")
         return FileResponse(Path(__file__).with_name("web_static") / asset_name,
@@ -1692,7 +1694,7 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
         if source.subtitle_url:
             # Subtitle CDNs do not consistently allow cross-origin <track>
             # requests from Telegram WebView. Keep the signed URL server-side;
-            # a short-lived owner-bound ticket returns WebVTT from this origin.
+            # a short-lived owner-bound ticket returns subtitles from this origin.
             subtitle_ticket = app.state.subtitle_tickets.create(user_id, source.subtitle_url)
             subtitle_url = f"/api/subtitles/{subtitle_ticket}"
         # Direct playback is first choice. The private ticket is only used after
@@ -2004,12 +2006,7 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
 
     @app.get("/api/subtitles/{ticket}")
     async def subtitles(ticket: str, user_id=Depends(authenticated_user)):
-        """Return a small subtitle file as same-origin WebVTT for <track>.
-
-        This intentionally buffers only bounded subtitle text (never video) in
-        a temporary directory.  ASS/SSA styling needs a libass renderer to be
-        fully preserved; WebVTT is the reliable fallback in Telegram WebView.
-        """
+        """Preserve ASS/SSA for libass; convert only SRT to native WebVTT."""
         item = app.state.subtitle_tickets.get(ticket, user_id)
         if item is None:
             raise HTTPException(404, "Subtitle link is unavailable or expired.")
@@ -2018,7 +2015,9 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
                 directory = Path(name)
                 subtitle = await asyncio.to_thread(app.state.downloads.media._download_subtitle,
                                                     item.url, directory)
-                output = subtitle if subtitle.suffix.lower() == ".vtt" else directory / "subtitles.vtt"
+                suffix = subtitle.suffix.lower()
+                is_ass = suffix in {".ass", ".ssa"}
+                output = subtitle if is_ass or suffix == ".vtt" else directory / "subtitles.vtt"
                 if output != subtitle:
                     await _run("ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(subtitle),
                                "-c:s", "webvtt", str(output))
@@ -2032,7 +2031,7 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
         except OSError:
             LOG.warning("Subtitle preparation failed (storage error)")
             raise HTTPException(502, "Не удалось подготовить субтитры для плеера.") from None
-        return Response(content=body, media_type="text/vtt; charset=utf-8",
+        return Response(content=body, media_type="text/x-ssa; charset=utf-8" if is_ass else "text/vtt; charset=utf-8",
                         headers={"Cache-Control": "no-store"})
 
     return app

@@ -274,6 +274,45 @@ class WebTests(unittest.TestCase):
         self.store.add_allowed_user(7, owner_id=42)
         self.assertEqual(self.client.get(subtitle_url, headers=self.headers(7)).status_code, 404)
 
+    def test_ass_and_ssa_are_returned_verbatim_without_ffmpeg(self):
+        body = (Path(__file__).parent / "fixtures" / "rendering.ass").read_bytes()
+        ticket = self.app.state.subtitle_tickets.create(42, "https://cdn.example/sub.ass")
+        for suffix in (".ass", ".ssa"):
+            with self.subTest(suffix=suffix):
+                def download(_url, directory):
+                    path = directory / ("subtitles" + suffix)
+                    path.write_bytes(body)
+                    return path
+                with patch.object(self.app.state.downloads.media, "_download_subtitle", download), \
+                        patch("ani365_bot.web._run", new_callable=AsyncMock) as convert:
+                    response = self.client.get(f"/api/subtitles/{ticket}", headers=self.headers(42))
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.content, body)
+                self.assertIn("text/x-ssa", response.headers["content-type"])
+                convert.assert_not_awaited()
+
+    def test_srt_is_converted_to_webvtt(self):
+        ticket = self.app.state.subtitle_tickets.create(42, "https://cdn.example/sub.srt")
+        def download(_url, directory):
+            path = directory / "subtitles.srt"
+            path.write_text("1\n00:00:01,000 --> 00:00:02,000\nПривет\n", encoding="utf-8")
+            return path
+        with patch.object(self.app.state.downloads.media, "_download_subtitle", download):
+            response = self.client.get(f"/api/subtitles/{ticket}", headers=self.headers(42))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/vtt", response.headers["content-type"])
+        self.assertTrue(response.text.startswith("WEBVTT"))
+        self.assertIn("Привет", response.text)
+
+    def test_libass_assets_are_served(self):
+        for name in ("subtitles-octopus.js", "subtitles-octopus-worker.js",
+                     "subtitles-octopus-worker-legacy.js", "LiberationSans-Regular.ttf"):
+            self.assertEqual(self.client.get(f"/assets/{name}").status_code, 200)
+        response = self.client.get("/assets/subtitles-octopus-worker.wasm")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "application/wasm")
+        self.assertEqual(response.content[:4], b"\x00asm")
+
     def test_ended_marks_short_or_unknown_duration_as_watched(self):
         self.store.add_watchlist(42, 55, "Title")
         result = self.client.post("/api/progress", headers=self.headers(42), json={
@@ -567,9 +606,9 @@ variants/720.m3u8?signature=private
         script = self.client.get("/assets/app.js").text
         self.assertIn('id="fullscreen"', script)
         self.assertIn("telegram.requestFullscreen", script)
-        self.assertIn("video.requestFullscreen", script)
-        self.assertIn("video.webkitRequestFullscreen", script)
-        self.assertIn("video.webkitEnterFullscreen", script)
+        self.assertIn("target.requestFullscreen", script)
+        self.assertIn("target.webkitRequestFullscreen", script)
+        self.assertIn("video.closest?.('.player-surface')", script)
         self.assertIn("fullscreenFailed", script)
         self.assertIn(".miniapp-fullscreen .player-page video", self.client.get("/assets/app.css").text)
 

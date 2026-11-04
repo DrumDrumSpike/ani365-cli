@@ -1,0 +1,16 @@
+[Script Info]
+ScriptType: v4.00+
+PlayResX: 640
+PlayResY: 360
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Liberation Sans,28,&H0000FF00,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,1,1,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:05.00,Default,,0,0,0,,{\an7\pos(80,60)\bord0\shad0\1c&H0000FF&\p1}m 0 0 l 75 0 75 6 0 6{\p0}
+Dialogue: 1,0:00:01.00,0:00:05.00,Default,,0,0,0,,{\an7\pos(80,80)\fnLiberation Sans\fs28\bord1\shad1\blur0.2\c&H00FF00&}Привет
+Dialogue: 2,0:00:01.00,0:00:05.00,Default,,0,0,0,,{\an7\move(100,180,300,180)\bord0\shad0\c&HFF0000&\fad(200,200)\t(0,3000,\fscx150)\p1}m 0 0 l 20 0 20 20 0 20
+Dialogue: 3,0:00:01.00,0:00:05.00,Default,,0,0,0,,{\an9\pos(600,40)\fade(255,0,255,0,200,3500,4000)}Слой 3

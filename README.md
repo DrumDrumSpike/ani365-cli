@@ -23,11 +23,13 @@ Fallback читает только небольшой playlist и заменяе
 На Android/WebView без native HLS Mini App локально подгружает `hls.js 1.7.3`
 только для таких потоков; сторонний CDN для JavaScript не используется.
 
-Если Anime365 вернул субтитры, Mini App добавляет их в плеер как same-origin
-WebVTT track. Ссылка Anime365 остаётся на backend в короткоживущем owner-bound
-ticket: это решает CORS ограничения Telegram WebView. ASS/SSA и SRT конвертируются
-в WebVTT только как небольшой subtitle-файл; видео при этом не скачивается и не
-перекодируется. В WebVTT fallback не сохраняются ASS-эффекты и позиционирование.
+Если Anime365 вернул субтитры, Mini App получает их через same-origin,
+короткоживущий owner-bound ticket: ссылка CDN остаётся на backend.
+ASS/SSA передаются без потери оформления и отображаются libass (WebAssembly)
+поверх существующего HTML5 video; сохраняются позиционирование, рисунки, слои и
+эффекты. SRT конвертируется в WebVTT, VTT использует нативный track.
+Видео не скачивается и не перекодируется. Подробности, ограничения шрифтов и
+проверки описаны в [docs/subtitles.md](docs/subtitles.md).
 
 Доступ к Mini App имеют только `OWNER_ID` и ID из существующего bot allowlist.
 Сервер проверяет подпись Telegram WebApp `initData` и никогда не принимает ID

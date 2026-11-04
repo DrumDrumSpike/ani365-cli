@@ -61,3 +61,38 @@ test('subtitles use authenticated fetch, enable native track, and release blob',
   assert.equal(revoked, 'blob:captions');
   assert.ok(request.options.signal.aborted);
 });
+
+test('ASS is passed intact to libass without creating a native text track', async () => {
+  const body = fs.readFileSync('tests/fixtures/rendering.ass', 'utf8');
+  let options, disposed = false, freed = false, restored;
+  const button = {remove() {}};
+  const status = {after() {}};
+  const context = {
+    document: {createElement: tag => tag === 'button' ? button : {addEventListener() {}, remove() {}}},
+    initData: '', AbortController,
+    SubtitlesOctopus: function(value) {
+      options = value; this.worker = {}; this.dispose = () => disposed = true;
+      this.freeTrack = () => freed = true; this.setTrack = value => restored = value;
+    },
+    fetch: async () => ({ok: true, text: async () => body}),
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('  function loadPlayerSubtitles('), source.indexOf('  async function player(quality)')), context);
+  const video = {setAttribute() {}};
+  const cleanup = context.loadPlayerSubtitles(video, '/subtitle', status);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(options.subContent, body);
+  assert.equal(options.video, video);
+  assert.equal(options.workerUrl, '/assets/subtitles-octopus-worker.js');
+  button.onclick(); assert.ok(freed);
+  button.onclick(); assert.equal(restored, body);
+  cleanup(); assert.ok(disposed);
+});
+
+test('fullscreen requests the container that includes the ASS overlay', async () => {
+  let fullscreen = false;
+  const container = {requestFullscreen: async () => fullscreen = true};
+  const {context} = setup();
+  await context.playerFullscreen({closest: () => container}, {});
+  assert.ok(fullscreen);
+});
