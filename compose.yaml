@@ -82,6 +82,7 @@ services:
         condition: service_healthy
     volumes:
       - bot-data:/data
+      - ${SUBTITLE_FONTS_DIR:-./data/subtitle-fonts}:/data/subtitle-fonts:ro
       - media-jobs:/jobs
     restart: unless-stopped
     init: true

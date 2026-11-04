@@ -96,3 +96,23 @@ test('fullscreen requests the container that includes the ASS overlay', async ()
   await context.playerFullscreen({closest: () => container}, {});
   assert.ok(fullscreen);
 });
+
+test('ASS font loading respects Format, inline overrides and all available faces', async () => {
+  const body = '[Script Info]\n[V4+ Styles]\nFormat: Fontsize, Name, Fontname\nStyle: 22,Main,@Tahoma\n[Events]\nDialogue: 0,0:00:01,0:00:02,Main,,0,0,0,,{\\fnImpact\\b1}Title{\\fnGeorgia}Other';
+  let options;
+  const context = {
+    document: {createElement: () => ({addEventListener() {}, remove() {}})},
+    initData: '', AbortController,
+    SubtitlesOctopus: function(value) {options = value;},
+    fetch: async () => ({ok: true, text: async () => body}),
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('  function loadPlayerSubtitles('), source.indexOf('  async function player(quality)')), context);
+  context.loadPlayerSubtitles({setAttribute() {}}, '/subtitle', {after() {}}, {
+    tahoma: ['/tahoma.ttf','/tahomabd.ttf'], impact: ['/impact.ttf'],
+    georgia: ['/georgia.ttf','/georgiab.ttf'], unused: ['/unused.ttf'],
+  });
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(options.subContent, body);
+  assert.deepEqual(Array.from(options.fonts), ['/tahoma.ttf','/tahomabd.ttf','/impact.ttf','/georgia.ttf','/georgiab.ttf']);
+});

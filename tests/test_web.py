@@ -304,6 +304,35 @@ class WebTests(unittest.TestCase):
         self.assertTrue(response.text.startswith("WEBVTT"))
         self.assertIn("Привет", response.text)
 
+    def test_deployment_subtitle_fonts_are_listed_and_only_manifest_files_are_served(self):
+        directory = self.config.data_dir / "subtitle-fonts"
+        directory.mkdir()
+        (directory / "regular.ttf").write_bytes(b"test-font-regular")
+        (directory / "bold.ttf").write_bytes(b"test-font-bold")
+        (directory / "private.ttf").write_bytes(b"not-in-manifest")
+        (directory / "fonts.json").write_text(json.dumps({
+            "Verdana": ["regular.ttf", "bold.ttf", "missing.ttf", "../secret.ttf"],
+        }))
+        self.store.add_watchlist(42, 55, "Title")
+        self.store.save_token(42, "anime365-secret-token")
+        response = self.client.post("/api/play", headers=self.headers(42), json={
+            "series_id": 55, "episode_id": 700, "translation_id": 800, "quality": 1080,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["subtitle_fonts"], {"verdana": [
+            "/assets/subtitle-fonts/regular.ttf", "/assets/subtitle-fonts/bold.ttf",
+        ]})
+        font = self.client.get("/assets/subtitle-fonts/bold.ttf")
+        self.assertEqual(font.content, b"test-font-bold")
+        self.assertEqual(font.headers["cache-control"], "public, max-age=86400")
+        self.assertEqual(self.client.get("/assets/subtitle-fonts/private.ttf").status_code, 404)
+        self.assertEqual(self.client.get("/assets/subtitle-fonts/fonts.json").status_code, 404)
+        (directory / "bold.ttf").unlink()
+        (directory / "bold.ttf").symlink_to(directory / "private.ttf")
+        self.assertEqual(self.client.get("/assets/subtitle-fonts/bold.ttf").status_code, 404)
+        (directory / "fonts.json").write_text("invalid-json")
+        self.assertEqual(self.client.get("/assets/subtitle-fonts/regular.ttf").status_code, 404)
+
     def test_libass_assets_are_served(self):
         for name in ("subtitles-octopus.js", "subtitles-octopus-worker.js",
                      "subtitles-octopus-worker-legacy.js", "LiberationSans-Regular.ttf"):

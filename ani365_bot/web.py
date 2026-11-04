@@ -33,6 +33,7 @@ from .matching import rank_anime365_candidates, shikimori_titles
 from .shikimori import Shikimori, ShikimoriError
 from .seasonal import SeasonalCatalog
 from .translations import group_translations, viewing_type
+from .subtitle_fonts import subtitle_fonts
 
 
 LOG = logging.getLogger(__name__)
@@ -1030,6 +1031,15 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
                             if asset_name == "hls-1.7.3.min.js"
                             else {"Cache-Control": "no-store, max-age=0"})
 
+    @app.get("/assets/subtitle-fonts/{font_name}")
+    async def subtitle_font(font_name: str):
+        # Only explicitly installed fonts are exposed, never arbitrary data files.
+        allowed = {name for files in subtitle_fonts(config.data_dir).values() for name in files}
+        if font_name not in allowed:
+            raise HTTPException(404, "Not found")
+        return FileResponse(config.data_dir / "subtitle-fonts" / font_name,
+                            headers={"Cache-Control": "public, max-age=86400"})
+
     @app.get("/internal/recommendations/profiles")
     async def recommendation_profiles(_=Depends(require_recommender)):
         """Small, credential-free input snapshot for the weekly local worker."""
@@ -1700,6 +1710,8 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
         # Direct playback is first choice. The private ticket is only used after
         # a WebView/CDN incompatibility, never for normal video traffic.
         return {"media_url": source.urls[0], "subtitle_url": subtitle_url,
+                "subtitle_fonts": {family: [f"/assets/subtitle-fonts/{name}" for name in files]
+                                   for family, files in subtitle_fonts(config.data_dir).items()} if subtitle_url else {},
                 "proxy_url": f"/api/stream/{proxy_ticket}", "episode_number": str(
                     episode.get("episodeFull") or episode.get("episodeInt") or "?")}
 

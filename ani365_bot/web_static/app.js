@@ -526,7 +526,7 @@
       document.body.classList.remove('miniapp-fullscreen', 'player-expanded');
     };
   }
-  function loadPlayerSubtitles(video, url, status) {
+  function loadPlayerSubtitles(video, url, status, availableFonts = {}) {
     const controller = new AbortController();
     let objectUrl;
     let renderer;
@@ -551,10 +551,31 @@
           // Keep the entire script, including PlayRes, styles, layers, drawings,
           // embedded fonts and animations. libass owns layout and the video clock.
           if (typeof SubtitlesOctopus !== 'function') throw new Error('libass unavailable');
+          // Load only families requested by this script, but include every face
+          // so libass can choose real bold/italic instead of synthesizing them.
+          const families = new Set();
+          const familyKey = name => name.trim().replace(/^@/, '').toLowerCase();
+          let section = '', fields = [];
+          for (const raw of body.split(/\r?\n/)) {
+            const line = raw.trim();
+            if (line.startsWith('[')) section = line.toLowerCase();
+            else if (section === '[v4+ styles]' || section === '[v4 styles]') {
+              if (/^Format:/i.test(line)) fields = line.slice(line.indexOf(':') + 1).split(',').map(v => v.trim().toLowerCase());
+              else if (/^Style:/i.test(line)) {
+                const name = line.slice(line.indexOf(':') + 1).split(',')[fields.indexOf('fontname')];
+                if (name) families.add(familyKey(name));
+              }
+            } else if (section === '[events]' && /^Dialogue:/i.test(line)) {
+              for (const block of line.matchAll(/\{([^}]*)\}/g)) {
+                for (const match of block[1].matchAll(/\\fn([^\\}]+)/g)) families.add(familyKey(match[1]));
+              }
+            }
+          }
+          const fonts = [...new Set([...families].flatMap(name => availableFonts[name] || []))];
           video.setAttribute('controlslist', 'nofullscreen');
           video.disablePictureInPicture = true;
           renderer = new SubtitlesOctopus({
-            video, subContent: body,
+            video, subContent: body, fonts,
             workerUrl: '/assets/subtitles-octopus-worker.js',
             legacyWorkerUrl: '/assets/subtitles-octopus-worker-legacy.js',
             fallbackFont: '/assets/LiberationSans-Regular.ttf',
@@ -598,6 +619,6 @@
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }
-  async function player(quality) { try { state.view = 'player'; const result = await api('/api/play', {method:'POST', body:JSON.stringify({series_id:state.selected.item.series_id, episode_id:state.episode.id, translation_id:state.translation, quality})}); root.innerHTML = `<section class="player-page"><h1>${esc(state.selected.item.title)} <span>· Серия ${esc(state.episode.number)}</span></h1><div class="player-surface"><video controls playsinline></video></div>${result.subtitle_url ? '<p class="meta" id="subtitle-status">Загружаем субтитры…</p>' : ''}<p><button class="action secondary" id="fullscreen">На весь экран</button><button class="action secondary" id="fallback">Использовать proxy-поток</button></p><button class="action secondary back">Назад</button></section>`; const video = root.querySelector('video'); const fullscreenButton = root.querySelector('#fullscreen'); const stopWatchingFullscreen = watchPlayerFullscreen(video, fullscreenButton); const stopSubtitles = result.subtitle_url ? loadPlayerSubtitles(video, result.subtitle_url, root.querySelector('#subtitle-status')) : () => {}; state.player = {video, cleanup: () => { stopWatchingFullscreen(); stopSubtitles(); video.pause(); destroyHls(); }}; const hls = isHlsSource(result.media_url); let usingProxy = false; const fallback = async () => { if (usingProxy) return; usingProxy = true; const button = root.querySelector('#fallback'); button.disabled = true; button.textContent = 'Подключаем proxy…'; await setVideoSource(video, result.proxy_url, hls); video.play().catch(()=>{}); button.textContent = 'Proxy-поток подключён'; }; const start = () => setVideoSource(video, result.media_url, hls, () => fallback().catch(()=>{})); await start(); video.addEventListener('error', () => { if (!usingProxy) fallback().catch(()=>{}); }); let last = 0; const save = (ended=false) => { if (!video.duration || Date.now()-last < 15000 && !ended) return; last=Date.now(); api('/api/progress',{method:'POST',body:JSON.stringify({series_id:state.selected.item.series_id,episode_id:state.episode.id,position_seconds:video.currentTime,duration_seconds:video.duration,ended})}).catch(()=>{}); }; video.addEventListener('timeupdate', () => save(false)); video.addEventListener('pause', () => save(false)); video.addEventListener('ended', () => save(true)); fullscreenButton.onclick = () => playerFullscreen(video, fullscreenButton); root.querySelector('#fallback').onclick = () => fallback().catch(error => fail(error)); root.querySelector('.back').onclick = () => { save(false); state.player?.cleanup(); state.player = null; details(state.selected.item.series_id); }; } catch(error) { destroyHls(); fail(error); } }
+  async function player(quality) { try { state.view = 'player'; const result = await api('/api/play', {method:'POST', body:JSON.stringify({series_id:state.selected.item.series_id, episode_id:state.episode.id, translation_id:state.translation, quality})}); root.innerHTML = `<section class="player-page"><h1>${esc(state.selected.item.title)} <span>· Серия ${esc(state.episode.number)}</span></h1><div class="player-surface"><video controls playsinline></video></div>${result.subtitle_url ? '<p class="meta" id="subtitle-status">Загружаем субтитры…</p>' : ''}<p><button class="action secondary" id="fullscreen">На весь экран</button><button class="action secondary" id="fallback">Использовать proxy-поток</button></p><button class="action secondary back">Назад</button></section>`; const video = root.querySelector('video'); const fullscreenButton = root.querySelector('#fullscreen'); const stopWatchingFullscreen = watchPlayerFullscreen(video, fullscreenButton); const stopSubtitles = result.subtitle_url ? loadPlayerSubtitles(video, result.subtitle_url, root.querySelector('#subtitle-status'), result.subtitle_fonts) : () => {}; state.player = {video, cleanup: () => { stopWatchingFullscreen(); stopSubtitles(); video.pause(); destroyHls(); }}; const hls = isHlsSource(result.media_url); let usingProxy = false; const fallback = async () => { if (usingProxy) return; usingProxy = true; const button = root.querySelector('#fallback'); button.disabled = true; button.textContent = 'Подключаем proxy…'; await setVideoSource(video, result.proxy_url, hls); video.play().catch(()=>{}); button.textContent = 'Proxy-поток подключён'; }; const start = () => setVideoSource(video, result.media_url, hls, () => fallback().catch(()=>{})); await start(); video.addEventListener('error', () => { if (!usingProxy) fallback().catch(()=>{}); }); let last = 0; const save = (ended=false) => { if (!video.duration || Date.now()-last < 15000 && !ended) return; last=Date.now(); api('/api/progress',{method:'POST',body:JSON.stringify({series_id:state.selected.item.series_id,episode_id:state.episode.id,position_seconds:video.currentTime,duration_seconds:video.duration,ended})}).catch(()=>{}); }; video.addEventListener('timeupdate', () => save(false)); video.addEventListener('pause', () => save(false)); video.addEventListener('ended', () => save(true)); fullscreenButton.onclick = () => playerFullscreen(video, fullscreenButton); root.querySelector('#fallback').onclick = () => fallback().catch(error => fail(error)); root.querySelector('.back').onclick = () => { save(false); state.player?.cleanup(); state.player = null; details(state.selected.item.series_id); }; } catch(error) { destroyHls(); fail(error); } }
   api('/api/me').then(async () => { const params = new URLSearchParams(location.search); const seriesId = Number(params.get('series_id')); const episodeId = Number(params.get('episode_id')); if (seriesId) { await details(seriesId); if (episodeId && state.selected.episodes.some(item => item.id === episodeId)) await selectEpisode(episodeId); } else await home(); }).catch(error => { root.innerHTML = `<p class="error">${esc(error.message)}${initData ? '' : '<br>Откройте страницу из Telegram.'}</p>`; });
 })();
