@@ -670,6 +670,71 @@
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }
-  async function player(quality) { try { state.view = 'player'; const result = await api('/api/play', {method:'POST', body:JSON.stringify({series_id:state.selected.item.series_id, episode_id:state.episode.id, translation_id:state.translation, quality})}); root.innerHTML = `<section class="player-page"><h1 class="player-heading">${esc(state.selected.item.title)} <span>· Серия ${esc(state.episode.number)}</span></h1><div class="player-surface"><video controls playsinline></video><button class="player-exit" type="button">Выйти из полного экрана</button></div>${result.subtitle_url ? '<p class="meta player-subtitle-status" id="subtitle-status">Загружаем субтитры…</p>' : ''}<p class="player-actions"><button class="action secondary" id="fullscreen">На весь экран</button><button class="action secondary" id="fallback">Использовать proxy-поток</button></p><button class="action secondary back player-back">Назад</button></section>`; const video = root.querySelector('video'); const fullscreenButton = root.querySelector('#fullscreen'); const stopWatchingFullscreen = watchPlayerFullscreen(video, fullscreenButton); const stopSubtitles = result.subtitle_url ? loadPlayerSubtitles(video, result.subtitle_url, root.querySelector('#subtitle-status'), result.subtitle_fonts) : () => {}; state.player = {video, cleanup: () => { stopWatchingFullscreen(); stopSubtitles(); video.pause(); destroyHls(); }}; const hls = isHlsSource(result.media_url); let usingProxy = false; const fallback = async () => { if (usingProxy) return; usingProxy = true; const button = root.querySelector('#fallback'); button.disabled = true; button.textContent = 'Подключаем proxy…'; await setVideoSource(video, result.proxy_url, hls); video.play().catch(()=>{}); button.textContent = 'Proxy-поток подключён'; }; const start = () => setVideoSource(video, result.media_url, hls, () => fallback().catch(()=>{})); await start(); video.addEventListener('error', () => { if (!usingProxy) fallback().catch(()=>{}); }); let last = 0; const save = (ended=false) => { if (!video.duration || Date.now()-last < 15000 && !ended) return; last=Date.now(); api('/api/progress',{method:'POST',body:JSON.stringify({series_id:state.selected.item.series_id,episode_id:state.episode.id,position_seconds:video.currentTime,duration_seconds:video.duration,ended})}).catch(()=>{}); }; video.addEventListener('timeupdate', () => save(false)); video.addEventListener('pause', () => save(false)); video.addEventListener('ended', () => save(true)); fullscreenButton.onclick = () => playerFullscreen(video, fullscreenButton); root.querySelector('#fallback').onclick = () => fallback().catch(error => fail(error)); root.querySelector('.back').onclick = () => { save(false); state.player?.cleanup(); state.player = null; details(state.selected.item.series_id); }; } catch(error) { destroyHls(); fail(error); } }
+  function matchingPlayerTranslation(currentGroups, nextGroups, translationId) {
+    const group = currentGroups.find(group => group.items.some(item => Number(item.id) === Number(translationId)));
+    if (!group) return null;
+    const selected = group.items.find(item => Number(item.id) === Number(translationId));
+    const author = item => String(item.authorsSummary || item.title || '').trim().toLowerCase();
+    const candidates = nextGroups.filter(next => next.kind === group.kind && next.language === group.language)
+      .flatMap(next => next.items);
+    return candidates.find(item => author(item) === author(selected)) || null;
+  }
+
+  async function player(quality) { try { state.view = 'player'; const seriesId = state.selected.item.series_id; const episode = state.episode; const translationId = state.translation; const episodes = state.selected.episodes; const nextEpisode = episodes[episodes.findIndex(item => item.id === episode.id) + 1]; let active = true; let disposed = false; let pending = Promise.resolve(); const result = await api('/api/play', {method:'POST', body:JSON.stringify({series_id:seriesId, episode_id:episode.id, translation_id:translationId, quality})}); root.innerHTML = `<section class="player-page"><h1 class="player-heading">${esc(state.selected.item.title)} <span>· Серия ${esc(state.episode.number)}</span></h1><div class="player-surface"><video controls playsinline></video><button class="player-exit" type="button">Выйти из полного экрана</button></div>${result.subtitle_url ? '<p class="meta player-subtitle-status" id="subtitle-status">Загружаем субтитры…</p>' : ''}<p class="player-actions"><button class="action" id="complete-episode">${nextEpisode ? 'Просмотрено → Следующая серия' : 'Отметить просмотренной'}</button><button class="action secondary" id="fullscreen">На весь экран</button><button class="action secondary" id="fallback">Использовать proxy-поток</button></p><p class="meta" id="player-progress-status" role="status"></p><button class="action secondary back player-back">Назад</button></section>`; const video = root.querySelector('video'); const fullscreenButton = root.querySelector('#fullscreen'); const stopWatchingFullscreen = watchPlayerFullscreen(video, fullscreenButton); const stopSubtitles = result.subtitle_url ? loadPlayerSubtitles(video, result.subtitle_url, root.querySelector('#subtitle-status'), result.subtitle_fonts) : () => {}; state.player = {video, cleanup: () => { disposed = true; active = false; stopWatchingFullscreen(); stopSubtitles(); video.pause(); destroyHls(); }}; const hls = isHlsSource(result.media_url); let usingProxy = false; const fallback = async () => { if (!active || usingProxy) return; usingProxy = true; const button = root.querySelector('#fallback'); button.disabled = true; button.textContent = 'Подключаем proxy…'; await setVideoSource(video, result.proxy_url, hls); video.play().catch(()=>{}); button.textContent = 'Proxy-поток подключён'; }; const start = () => setVideoSource(video, result.media_url, hls, () => fallback().catch(()=>{})); await start(); video.addEventListener('error', () => { if (!usingProxy) fallback().catch(()=>{}); }); let last = 0;
+      const save = (ended=false) => {
+        if (!active || (!ended && (!Number.isFinite(video.duration) || !video.duration || Date.now()-last < 15000))) return pending;
+        last = Date.now();
+        const body = JSON.stringify({series_id:seriesId, episode_id:episode.id,
+          position_seconds:video.currentTime || 0,
+          duration_seconds:Number.isFinite(video.duration) ? video.duration : 0, ended});
+        pending = pending.catch(() => {}).then(() => api('/api/progress', {method:'POST', body}));
+        return pending;
+      };
+      video.addEventListener('timeupdate', () => save(false).catch(() => {}));
+      video.addEventListener('pause', () => save(false).catch(() => {}));
+      video.addEventListener('ended', () => save(true).catch(() => {}));
+      const completeButton = root.querySelector('#complete-episode');
+      completeButton.onclick = async () => {
+        completeButton.disabled = true;
+        const status = root.querySelector('#player-progress-status');
+        active = false;
+        video.pause();
+        try {
+          await pending.catch(() => {});
+          await api(`/api/library/${seriesId}/episodes/${episode.id}/watched`, {method:'POST'});
+          if (disposed) return;
+          episode.watched = true;
+          if (!nextEpisode) {
+            completeButton.textContent = '✓ Просмотрено';
+            status.textContent = 'Серия и предыдущие отмечены просмотренными.';
+            return;
+          }
+          status.textContent = 'Подбираем перевод следующей серии…';
+          const [current, next] = await Promise.all([
+            api(`/api/episodes/${episode.id}/translations?series_id=${seriesId}`),
+            api(`/api/episodes/${nextEpisode.id}/translations?series_id=${seriesId}`),
+          ]);
+          if (disposed) return;
+          const translation = matchingPlayerTranslation(current.groups, next.groups, translationId);
+          if (!translation) {
+            state.player?.cleanup(); state.player = null;
+            await selectEpisode(nextEpisode.id);
+            return;
+          }
+          const available = await api(`/api/translations/${translation.id}/qualities?series_id=${seriesId}`);
+          if (disposed) return;
+          state.player?.cleanup(); state.player = null;
+          state.episode = nextEpisode;
+          state.translation = translation.id;
+          if (available.items.some(value => Number(value) === Number(quality))) await player(quality);
+          else await qualities(translation.id);
+        } catch (error) {
+          if (disposed) return;
+          status.textContent = error.message || String(error);
+          active = true;
+          completeButton.disabled = false;
+        }
+      };
+      fullscreenButton.onclick = () => playerFullscreen(video, fullscreenButton); root.querySelector('#fallback').onclick = () => fallback().catch(error => fail(error)); root.querySelector('.back').onclick = () => { save(false); state.player?.cleanup(); state.player = null; details(seriesId); }; } catch(error) { destroyHls(); fail(error); } }
   api('/api/me').then(async () => { const params = new URLSearchParams(location.search); const seriesId = Number(params.get('series_id')); const episodeId = Number(params.get('episode_id')); if (seriesId) { await details(seriesId); if (episodeId && state.selected.episodes.some(item => item.id === episodeId)) await selectEpisode(episodeId); } else await home(); }).catch(error => { root.innerHTML = `<p class="error">${esc(error.message)}${initData ? '' : '<br>Откройте страницу из Telegram.'}</p>`; });
 })();

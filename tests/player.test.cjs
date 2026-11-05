@@ -237,3 +237,86 @@ test('libass repeated resize preserves paused subtitle pixels when geometry is u
   assert.equal(resets, 4);
   assert.equal(messages, 2);
 });
+
+function episodePlayer({last = false, missingTranslation = false, missingQuality = false} = {}) {
+  const events = {}, calls = [], nodes = {};
+  const video = {duration: 100, currentTime: 25, pause() {events.pause?.();},
+    play: async () => {}, addEventListener(name, fn) {events[name] = fn;}};
+  for (const key of ['#fullscreen', '#fallback', '#complete-episode', '#player-progress-status', '.back']) nodes[key] = {};
+  const episodes = [{id: 10, number: '1'}, {id: 20, number: '2'}];
+  const groups = id => [{kind: 'sub', language: 'ru', items: [{id, authorsSummary: 'Studio'}]}];
+  const state = {selected: {item: {series_id: 1, title: 'Title'}, episodes: last ? episodes.slice(0, 1) : episodes},
+    episode: episodes[0], translation: 100};
+  const context = {state, Date, Number, JSON, String, Promise, esc: String,
+    root: {querySelector: key => key === 'video' ? video : nodes[key]},
+    api: async (path, options) => {
+      calls.push([path, options?.body && JSON.parse(options.body)]);
+      if (path === '/api/play') return {media_url: 'video', proxy_url: 'proxy'};
+      if (path.includes('/10/translations')) return {groups: groups(100)};
+      if (path.includes('/20/translations')) return {groups: missingTranslation ? [] : groups(200)};
+      if (path.includes('/qualities')) return {items: missingQuality ? [480] : [720]};
+      return {};
+    },
+    watchPlayerFullscreen: () => () => {}, loadPlayerSubtitles: () => () => {},
+    isHlsSource: () => false, setVideoSource: async () => {}, destroyHls() {},
+    playerFullscreen() {}, fail(error) {throw error;}, details() {},
+    selectEpisode: async id => calls.push(['select', id]),
+    qualities: async id => calls.push(['qualities', id]),
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('  function matchingPlayerTranslation('), source.indexOf("  api('/api/me')")), context);
+  return {context, state, calls, events, nodes};
+}
+
+test('next episode completes before play, preserves translation and quality, ignores stale video events', async () => {
+  const h = episodePlayer();
+  await h.context.player(720);
+  h.events.timeupdate();
+  const oldTimeupdate = h.events.timeupdate;
+  await h.nodes['#complete-episode'].onclick();
+  const plays = h.calls.filter(([path]) => path === '/api/play');
+  assert.equal(plays.length, 2);
+  assert.equal(plays[1][1].episode_id, 20);
+  assert.equal(plays[1][1].translation_id, 200);
+  assert.equal(plays[1][1].quality, 720);
+  assert.ok(h.calls.findIndex(([path]) => path.endsWith('/watched')) < h.calls.lastIndexOf(plays[1]));
+  const count = h.calls.length;
+  oldTimeupdate();
+  await Promise.resolve();
+  assert.equal(h.calls.length, count);
+  assert.equal(h.calls.find(([path]) => path === '/api/progress')[1].episode_id, 10);
+});
+
+test('last episode is marked without opening another player', async () => {
+  const h = episodePlayer({last: true});
+  await h.context.player(720);
+  await h.nodes['#complete-episode'].onclick();
+  assert.equal(h.nodes['#complete-episode'].textContent, '✓ Просмотрено');
+  assert.equal(h.calls.filter(([path]) => path === '/api/play').length, 1);
+});
+
+for (const [option, destination, id] of [['missingTranslation', 'select', 20], ['missingQuality', 'qualities', 200]]) {
+  test(`${option} opens selection`, async () => {
+    const h = episodePlayer({[option]: true});
+    await h.context.player(720);
+    await h.nodes['#complete-episode'].onclick();
+    assert.ok(h.calls.some(([path, value]) => path === destination && value === id));
+  });
+}
+
+test('failed completion keeps current episode and allows retry', async () => {
+  const h = episodePlayer();
+  const api = h.context.api;
+  h.context.api = async (path, options) => {
+    if (path.endsWith('/watched')) throw Error('Сеть недоступна');
+    return api(path, options);
+  };
+  await h.context.player(720);
+  await h.nodes['#complete-episode'].onclick();
+  assert.equal(h.state.episode.id, 10);
+  assert.equal(h.nodes['#complete-episode'].disabled, false);
+  assert.equal(h.nodes['#player-progress-status'].textContent, 'Сеть недоступна');
+  h.context.api = api;
+  await h.nodes['#complete-episode'].onclick();
+  assert.equal(h.state.episode.id, 20);
+});
