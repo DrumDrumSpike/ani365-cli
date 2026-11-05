@@ -639,7 +639,7 @@ variants/720.m3u8?signature=private
         self.assertIn("target.webkitRequestFullscreen", script)
         self.assertIn("video.closest?.('.player-surface')", script)
         self.assertIn("fullscreenFailed", script)
-        self.assertIn(".miniapp-fullscreen .player-page video", self.client.get("/assets/app.css").text)
+        self.assertIn(".player-expanded .player-surface video", self.client.get("/assets/app.css").text)
 
     def test_background_shikimori_import_is_owner_bound_and_durable(self):
         self.store.save_external_account(42, "shikimori", "access", "refresh", time.time() + 3600, "123")

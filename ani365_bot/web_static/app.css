@@ -50,29 +50,34 @@ h1, h2 { margin: 0; letter-spacing: -.04em; } h1 { font-size: clamp(28px, 7vw, 4
 .batch-episodes { display: grid; gap: 7px; margin-top: 12px; }.batch-episode { display: flex; align-items: flex-start; gap: 7px; padding: 10px 0; border-bottom: 1px solid var(--line); color: var(--text); line-height: 1.35; }.batch-episode:last-child { border-bottom: 0; }.batch-episode input { flex: 0 0 auto; margin-top: 3px; }
 input, select { width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 12px; outline-color: var(--accent); background: #171820; color: var(--text); } input[type="checkbox"] { width: auto; margin-right: 6px; }
 button.action { margin: 6px 6px 6px 0; padding: 11px 15px; border: 0; border-radius: 999px; background: var(--accent); color: white; box-shadow: 0 9px 25px rgba(255,91,86,.18); font-weight: 750; } button.action:hover { background: #ff6d67; } button.secondary { background: #252630; box-shadow: none; color: var(--text); }.inline-actions { display: flex; gap: 7px; align-items: center; margin: 8px 0; }.inline-actions input { min-width: 0; flex: 1; }.inline-actions .action { flex: 0 0 auto; margin: 0; }
-video { display: block; width: 100%; max-height: 75vh; border-radius: 18px; background: #000; }.player-page h1 { margin: 11px 0 16px; font-size: 23px; }.player-page h1 span { color: var(--muted); font-size: 16px; font-weight: 600; }.miniapp-fullscreen #app { width: 100%; max-width: none; }.miniapp-fullscreen .player-page video { max-height: calc(100vh - 88px); border-radius: 0; }.miniapp-fullscreen .bottom-nav { display: none; }
+video { display: block; width: 100%; max-height: 75vh; border-radius: 18px; background: #000; }.player-page h1 { margin: 11px 0 16px; font-size: 23px; }.player-page h1 span { color: var(--muted); font-size: 16px; font-weight: 600; }
 .app-fullscreen #app, :fullscreen #app { width: 100%; max-width: none; min-height: 100vh; padding: 0 32px calc(100px + env(safe-area-inset-bottom)); }.app-fullscreen .bottom-nav, :fullscreen .bottom-nav { max-width: none; border-radius: 0; }
 .bottom-nav { position: fixed; z-index: 50; right: 0; bottom: 0; left: 0; display: grid; grid-template-columns: repeat(7, minmax(48px, 1fr)); overflow-x: auto; max-width: 640px; margin: 0 auto; padding: 7px 8px max(8px, env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: rgba(13,14,19,.93); backdrop-filter: blur(18px); }.bottom-nav button { display: flex; min-height: 52px; flex-direction: column; align-items: center; justify-content: center; gap: 3px; border-radius: 14px; color: rgba(255,255,255,.37); font-size: 10px; font-weight: 700; }.bottom-nav button span { font-size: 21px; line-height: 17px; }.bottom-nav button.active { color: #ff6a62; }
 @media (min-width: 620px) { #app { padding-right: 28px; padding-left: 28px; }.grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 28px 16px; }.hero-copy { min-height: 390px; padding: 38px; }.continue-hero { min-height: 390px; }.bottom-nav { border-right: 1px solid var(--line); border-left: 1px solid var(--line); border-radius: 20px 20px 0 0; } }
 @media (min-width: 900px) { .grid { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
 @media (max-width: 370px) { #app { padding-right: 12px; padding-left: 12px; }.title-header { display: block; }.detail-poster { display: block; margin: 0 auto 14px; }.bottom-nav { font-size: 10px; } }
 
-/* Native fullscreen must override the inline video height limit. */
+/* Video and libass always share the fullscreen surface. libass observes the
+   video size and positions its canvas inside the actual letterboxed picture. */
 .player-page video:fullscreen { width: 100vw; height: 100vh; max-height: none; border-radius: 0; object-fit: contain; }
 .player-page video:-webkit-full-screen { width: 100vw; height: 100vh; max-height: none; border-radius: 0; object-fit: contain; }
-.player-expanded { overflow: hidden; }
-.player-expanded .player-page { position: fixed; inset: 0; z-index: 1000; background: #000; }
-.player-expanded .player-page video { width: 100%; height: 100%; max-height: none; border-radius: 0; object-fit: contain; }
-.player-expanded .player-page > :not(.player-surface) { display: none; }
-.player-expanded .player-page > p:has(#fullscreen) { display: block; position: absolute; top: 12px; right: 12px; margin: 0; }
-.player-expanded #fallback { display: none; }
-
-/* Keep video and libass in the same fullscreen subtree. The renderer calculates
-   the actual picture rectangle (including letterboxing) and observes resizes. */
 .player-surface { position: relative; background: #000; }
 .libassjs-canvas-parent { pointer-events: none; z-index: 1; }
-.player-surface:fullscreen, .player-surface:-webkit-full-screen,
-.player-expanded .player-surface { width: 100%; height: 100%; background: #000; }
-.player-surface:fullscreen video, .player-surface:-webkit-full-screen video {
-  width: 100%; height: 100%; max-height: none; object-fit: contain; border-radius: 0;
+.player-expanded { overflow: hidden; }
+.player-expanded .player-surface { position: fixed; inset: 0; z-index: 1000; }
+.player-expanded .player-heading,
+.player-expanded .player-subtitle-status,
+.player-expanded .player-actions,
+.player-expanded .player-back,
+.player-expanded .player-subtitle-toggle,
+.player-expanded .app-topbar,
+.player-expanded .bottom-nav { display: none; }
+.player-surface:fullscreen { width: 100%; height: 100%; background: #000; }
+.player-surface:-webkit-full-screen { width: 100%; height: 100%; background: #000; }
+.player-expanded .player-surface video { width: 100%; height: 100%; max-height: none; border-radius: 0; object-fit: contain; }
+.player-exit { display: none; position: absolute; z-index: 2; top: 12px; right: 12px; padding: 10px 14px; border: 0; border-radius: 12px; color: white; background: rgba(30,30,30,.8); }
+.player-expanded .player-exit { display: block; }
+@media (hover: hover) and (pointer: fine) {
+  .player-expanded .controls-idle { cursor: none; }
+  .player-expanded .controls-idle .player-exit { opacity: 0; pointer-events: none; }
 }
