@@ -7,6 +7,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 
+HENTAI_SERIES_OFFSET = 1_000_000_000_000
 SCHEMA_VERSION = 14
 
 
@@ -1611,6 +1612,18 @@ class Store:
             SELECT DISTINCT series_id FROM watchlist
             WHERE notifications_enabled=1 ORDER BY series_id
         """).fetchall()]
+
+    def series_to_observe(self):
+        # Refresh availability for active titles even when Telegram alerts are off.
+        return [row[0] for row in self.db.execute("""
+            SELECT DISTINCT w.series_id FROM watchlist w
+            LEFT JOIN external_user_rates r ON r.user_id=w.user_id
+                AND r.provider='shikimori' AND r.anime365_series_id=w.series_id
+            WHERE w.series_id < ? AND (w.notifications_enabled=1 OR
+                (w.last_watched_episode_id IS NOT NULL AND
+                 COALESCE(r.status, 'watching') IN ('watching', 'rewatching')))
+            ORDER BY w.series_id
+        """, (HENTAI_SERIES_OFFSET,))]
 
     def observe_episodes(self, series_id, episodes, now=None):
         """Persist one shared Anime365 episode check for every watching user.

@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .api import APIError, Anime365, number, title
+from .store import HENTAI_SERIES_OFFSET
 from .downloads import DownloadManager
 from .http import HTTPClient
 from .mal import MyAnimeList, MyAnimeListError
@@ -57,7 +58,6 @@ HLS_URI_ATTRIBUTE = re.compile(r"(?P<prefix>\bURI=)(?P<quote>[\"'])(?P<value>.*?
 # SQLite and the legacy bot identify a title by one positive integer.  Keep the
 # optional Hentai365 catalogue in a disjoint range without rewriting existing
 # user data or allowing same-numbered titles from two services to collide.
-HENTAI_SERIES_OFFSET = 1_000_000_000_000
 
 
 class WebAuthError(ValueError):
@@ -353,11 +353,27 @@ def _api_error(exc):
     raise HTTPException(409 if exc.code in (401, 403) else 502, str(exc)) from None
 
 
+def _episode_index(value):
+    # Anime365 also returns display labels such as "ONA 1 серия" and "7 серия".
+    match = re.fullmatch(r"(?:[A-Za-zА-Яа-яЁё]+\s+)?(\d+(?:[.,]\d+)?)(?:\s+серия)?",
+                         str(value or "").strip(), re.IGNORECASE)
+    return float(match[1].replace(",", ".")) if match else None
+
+
+def _caught_up(item):
+    watched = item["last_watched_episode_id"]
+    if watched and watched == item["last_available_episode_id"]:
+        return True
+    seen = _episode_index(item["last_watched_episode_number"])
+    latest = _episode_index(item["last_available_episode_number"])
+    return seen is not None and latest is not None and seen >= latest
+
+
 def _episode_payload(episode, watched_id, watched_number):
     episode_id = int(episode["id"])
-    watched = episode_id == watched_id or (
-        watched_number is not None and number(episode.get("episodeInt") or episode.get("episodeFull"))
-        <= number(watched_number))
+    seen = _episode_index(watched_number)
+    current = _episode_index(episode.get("episodeInt") or episode.get("episodeFull"))
+    watched = episode_id == watched_id or (seen is not None and current is not None and current <= seen)
     return {
         "id": episode_id,
         "number": str(episode.get("episodeFull") or episode.get("episodeInt") or "?"),
@@ -1417,16 +1433,19 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
             status = item.get("shikimori_status")
             groups[status if status in SHIKIMORI_STATUSES else "watching"].append(item)
         active = groups["watching"] + groups["rewatching"]
+        active = [item for item in active if not _caught_up(item)]
+        for item in active:
+            item["playback"] = store.playback_progress(user_id, item["series_id"])
         active_ids = {item["series_id"] for item in active}
         recent = [{**source_item(item), **(
                   {"poster_url": hentai_metadata.get(str(int(item["series_id"]) - HENTAI_SERIES_OFFSET), {}).get("poster_url")}
                   if is_hentai_series(item["series_id"])
                   else metadata.get(item["series_id"], {}))} for item in store.recent_playback(user_id)
-                  if item["series_id"] in active_ids]
+                  if item["series_id"] in active_ids
+                  and item["playback"]["episode_id"] != item["last_watched_episode_id"]]
         new_episodes = [item for item in active
-                        if item.get("last_watched_episode_number") is not None
-                        and number(item.get("last_available_episode_number"))
-                        > number(item.get("last_watched_episode_number"))]
+                        if item["last_watched_episode_id"] and item["last_available_episode_id"]
+                        and _episode_index(item["last_available_episode_number"]) is not None]
         return {"items": active, "continue": recent, "new_episodes": new_episodes,
                 "groups": groups, "hentai_items": hentai_items}
 
@@ -1484,6 +1503,7 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
         episode = next((row for row in rows if int(row.get("id", 0)) == episode_id), None)
         if episode is None:
             raise HTTPException(422, "Выбранная серия больше недоступна.")
+        store.update_available(user_id, series_id, rows[-1])
         episode_number = str(episode.get("episodeFull") or episode.get("episodeInt") or "?")
         result = store.record_playback_progress(
             user_id, series_id, episode_id, 0, 0, episode_number, ended=True,
@@ -1734,6 +1754,8 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
             user_id, payload.series_id, payload.episode_id, payload.position_seconds,
             payload.duration_seconds, str(episode.get("episodeFull") or episode.get("episodeInt") or "?"),
             ended=payload.ended, completion_threshold=config.playback_completion_threshold)
+        if result and result["completed"]:
+            store.update_available(user_id, payload.series_id, rows[-1])
         if result and result["completed"] and not is_hentai_series(payload.series_id):
             # Keep local playback durable even when Shikimori is temporarily
             # unavailable. The task catches all expected remote failures.

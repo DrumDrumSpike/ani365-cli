@@ -15,8 +15,83 @@
   }
   const fail = error => { root.innerHTML = `<p class="error">${esc(error.message || error)}</p>`; };
   const navItems = [
-    ['home', '⌂', 'Главная'], ['seasonal', '✧', 'Новинки'], ['recommendations', '✦', 'Советы'], ['search', '⌕', 'Каталог'], ['hentai', '18+', 'Hentai365'], ['library', '▦', 'Моё'], ['downloads', '⇩', 'Загрузки'],
+    ['home', '⌂', 'Главная'], ['search', '⌕', 'Каталог'], ['library', '▦', 'Моё'],
+    ['downloads', '⇩', 'Загрузки'], ['more', '⋯', 'Ещё'],
   ];
+  const moreSections = ['more', 'seasonal', 'recommendations', 'hentai', 'settings'];
+  const nativeAvailable = version => Boolean(initData && telegram?.isVersionAtLeast?.(version));
+  let adultPreferenceKey;
+  function loadAdultPreference(userId) {
+    adultPreferenceKey = `ani365:adult-catalog:${userId}`;
+    try { state.adultCatalog = localStorage.getItem(adultPreferenceKey) === 'on'; }
+    catch (_) { state.adultCatalog = false; }
+  }
+  function setAdultPreference(enabled) {
+    state.adultCatalog = enabled;
+    try { localStorage.setItem(adultPreferenceKey, enabled ? 'on' : 'off'); } catch (_) {}
+  }
+  function more() {
+    state.view = 'more';
+    const sections = [['seasonal', 'Новинки'], ['recommendations', 'Советы']];
+    if (state.adultCatalog) sections.push(['hentai', 'Каталог 18+']);
+    sections.push(['settings', 'Настройки']);
+    root.innerHTML = `<section class="page-heading"><h1>Ещё</h1></section><div class="more-menu">${sections.map(([id, label]) => `<button data-nav="${id}">${label}<span aria-hidden="true">›</span></button>`).join('')}</div><button class="action secondary back">Назад</button>`;
+    root.querySelector('.back').onclick = home;
+  }
+  function applyTelegramTheme() {
+    document.documentElement.classList.toggle('telegram-theme', Boolean(initData && telegram?.themeParams?.bg_color));
+    document.documentElement.dataset.telegramScheme = telegram?.colorScheme || 'dark';
+  }
+  applyTelegramTheme();
+  telegram?.onEvent?.('themeChanged', applyTelegramTheme);
+  let homeMainVisible = false;
+  let nativeBackVisible = false;
+  const resumeFromMainButton = () => root.querySelector('#continue-watching')?.click();
+  const navigateBack = () => root.querySelector('.back')?.click();
+  function releaseNavigationButtons() {
+    if (homeMainVisible) {
+      telegram.MainButton.offClick(resumeFromMainButton);
+      telegram.MainButton.hide();
+      homeMainVisible = false;
+    }
+    if (nativeBackVisible) {
+      telegram.BackButton.offClick(navigateBack);
+      telegram.BackButton.hide();
+      nativeBackVisible = false;
+    }
+  }
+  function syncNavigationButtons() {
+    if (state.view === 'player') return;
+    const resume = state.view === 'home' && root.querySelector('#continue-watching');
+    const showMain = Boolean(resume && nativeAvailable('6.0') && telegram.MainButton);
+    if (showMain !== homeMainVisible) {
+      if (showMain) {
+        telegram.MainButton.onClick(resumeFromMainButton);
+        telegram.MainButton.setText('Продолжить просмотр');
+        telegram.MainButton.show();
+      } else {
+        telegram.MainButton.offClick(resumeFromMainButton);
+        telegram.MainButton.hide();
+      }
+      homeMainVisible = showMain;
+    }
+    const showBack = Boolean(root.querySelector('.back') && nativeAvailable('6.1') && telegram.BackButton);
+    if (showBack !== nativeBackVisible) {
+      if (showBack) {
+        telegram.BackButton.onClick(navigateBack);
+        telegram.BackButton.show();
+      } else {
+        telegram.BackButton.offClick(navigateBack);
+        telegram.BackButton.hide();
+      }
+      nativeBackVisible = showBack;
+    }
+  }
+  root.addEventListener('click', event => {
+    if (event.isTrusted && nativeAvailable('6.1') && event.target.closest('button:not(:disabled)')) {
+      telegram.HapticFeedback?.impactOccurred('light');
+    }
+  }, true);
   function updateAppFullscreen() {
     const active = Boolean(telegram?.isFullscreen || document.fullscreenElement);
     document.body.classList.toggle('app-fullscreen', active);
@@ -43,10 +118,10 @@
       updateAppFullscreen();
     };
     updateAppFullscreen();
-    root.insertAdjacentHTML('beforeend', `<nav class="bottom-nav" aria-label="Основная навигация">${navItems.map(([id, icon, label]) => `<button class="${state.view === id ? 'active' : ''}" data-nav="${id}"><span>${icon}</span>${label}</button>`).join('')}</nav>`);
+    root.insertAdjacentHTML('beforeend', `<nav class="bottom-nav" aria-label="Основная навигация">${navItems.map(([id, icon, label]) => `<button class="${(moreSections.includes(state.view) ? 'more' : state.view) === id ? 'active' : ''}" data-nav="${id}"><span aria-hidden="true">${icon}</span>${label}</button>`).join('')}</nav>`);
     root.querySelectorAll('[data-nav]').forEach(button => {
       const target = button.dataset.nav;
-      button.onclick = () => ({ home, seasonal, recommendations, search, hentai, library, downloads, settings }[target] || home)();
+      button.onclick = () => ({ home, seasonal, recommendations, search, hentai, library, downloads, more, settings }[target] || home)();
     });
   }
   const chromeObserver = new MutationObserver(() => {
@@ -55,10 +130,11 @@
       state.player = null;
     }
     addChrome();
+    syncNavigationButtons();
   });
   chromeObserver.observe(root, { childList: true });
-  function back() { telegram?.BackButton.hide(); home(); }
-  function useBack() { telegram?.BackButton.show(); telegram?.BackButton.onClick(back); }
+  function back() { home(); }
+  function useBack() { syncNavigationButtons(); }
   root.addEventListener('click', async event => {
     if (event.target.id !== 'save-shiki-status' || !state.selected) return;
     try {
@@ -71,29 +147,111 @@
   async function home() {
     try {
       state.view = 'home';
-      telegram?.BackButton.hide();
-      const data = await api('/api/library'); state.library = data.items;
+      const data = await api('/api/library');
+      if (state.view !== 'home') return;
+      state.library = data.items;
       const resume = data.continue?.[0];
       const resumeText = resume?.playback ? `${Math.floor(resume.playback.position_seconds / 60)}:${String(Math.floor(resume.playback.position_seconds % 60)).padStart(2, '0')}` : '';
-      root.innerHTML = `<div class="home-page">${resume ? `<section class="continue-hero"><img src="/assets/anime-night.webp" alt="" aria-hidden="true"><div class="hero-copy"><p class="eyebrow">Продолжить просмотр</p><h1>${esc(resume.title)}</h1><button class="action hero-action" id="continue-watching">▶ Продолжить${resumeText ? ` с ${esc(resumeText)}` : ''}</button><button class="text-link hero-all" id="continue-all">Все серии</button></div></section>` : `<section class="welcome-hero"><p class="eyebrow">Anime365</p><h1>Ваше аниме<br>в одном месте</h1><p>Найдите тайтл, добавьте его в библиотеку и продолжайте просмотр с того же места.</p><button class="action" id="search">Найти аниме</button></section>`}<section class="section-heading"><div><p class="eyebrow">Ваша очередь</p><h2>Смотрю сейчас</h2></div><button class="text-link" id="library">Все ›</button></section>${cards(data.items)}${data.new_episodes?.length ? `<section class="new-episodes"><span>✦</span><div><h2>Новые серии</h2><div class="new-episode-list">${data.new_episodes.slice(0, 3).map(item => `<button class="new-episode-item" data-new-series="${esc(item.series_id)}" data-new-episode="${esc(item.last_available_episode_id || '')}"><strong>${esc(item.title)}</strong><span>Серия ${esc(item.last_available_episode_number || '?')} ›</span></button>`).join('')}</div><button class="text-link" id="library-updates">Посмотреть обновления в библиотеке ›</button></div></section>` : ''}</div>`;
+      root.innerHTML = `<div class="home-page"><div id="home-refresh-indicator" class="home-refresh-indicator" hidden>Потяните вниз для обновления</div>${resume ? `<section class="continue-hero"><img src="/assets/anime-night.webp" alt="" aria-hidden="true"><div class="hero-copy"><p class="eyebrow">Продолжить просмотр</p><h1>${esc(resume.title)}</h1><button class="action hero-action" id="continue-watching">▶ Продолжить${resumeText ? ` с ${esc(resumeText)}` : ''}</button><button class="text-link hero-all" id="continue-all">Все серии</button></div></section>` : `<section class="welcome-hero"><p class="eyebrow">Anime365</p><h1>Ваше аниме<br>в одном месте</h1><p>Найдите тайтл, добавьте его в библиотеку и продолжайте просмотр с того же места.</p><button class="action" id="search">Найти аниме</button></section>`}${data.new_episodes?.length ? `<section class="new-episodes"><span>✦</span><div><h2>Новые серии</h2><div class="new-episode-list">${data.new_episodes.slice(0, 3).map(item => `<button class="new-episode-item" data-new-series="${esc(item.series_id)}" data-new-episode="${esc(item.last_available_episode_id || '')}"><strong>${esc(item.title)}</strong><span>Вышла: ${esc(item.last_available_episode_number || '?')} ›</span></button>`).join('')}</div><button class="text-link" id="library-updates">Посмотреть обновления в библиотеке ›</button></div></section>` : '<section class="new-episodes"><div><h2>Новые серии</h2><p>Пока нет известных обновлений для начатых тайтлов.</p></div></section>'}<section class="section-heading"><div><p class="eyebrow">Ваша очередь</p><h2>Смотрю сейчас</h2></div><button class="text-link" id="library">Все ›</button></section>${homeCards(data.items, data.new_episodes || [])}</div>`;
       const searchButton = document.getElementById('search'); if (searchButton) searchButton.onclick = search;
       const libraryButton = document.getElementById('library'); if (libraryButton) libraryButton.onclick = () => library();
       const updatesButton = document.getElementById('library-updates'); if (updatesButton) updatesButton.onclick = () => library(true);
+      root.querySelectorAll('[data-home-watch]').forEach(button => button.onclick = () => openHomeSeries(Number(button.dataset.homeWatch)));
       root.querySelectorAll('[data-new-series]').forEach(button => button.onclick = () => openNewEpisode(Number(button.dataset.newSeries), Number(button.dataset.newEpisode)));
       root.querySelectorAll('[data-series]').forEach(button => button.onclick = () => details(Number(button.dataset.series)));
+      bindHomePullToRefresh();
+      root.querySelectorAll('.home-poster img').forEach(image => { const mark = ok => { const poster = image.closest('.home-poster'); poster?.classList.add(ok ? 'poster-ready' : 'poster-failed'); if (ok) image.classList.add('loaded'); }; image.addEventListener('load', () => mark(true), {once:true}); image.addEventListener('error', () => mark(false), {once:true}); if (image.complete) mark(image.naturalWidth > 0); });
       if (resume) {
         const seriesId = Number(resume.series_id);
         root.querySelector('#continue-all').onclick = () => details(seriesId, true);
         root.querySelector('#continue-watching').onclick = async () => {
           if (!await details(seriesId)) return;
           const {playback, episodes} = state.selected;
-          const savedEpisode = episodes.find(item => Number(item.id) === Number(playback?.episode_id));
+          const savedEpisode = episodes.find(item => Number(item.id) === Number(playback?.episode_id) && !item.watched);
           if (savedEpisode) return resumeDirect(savedEpisode.id);
           const nextEpisode = episodes.find(item => !item.watched);
           if (nextEpisode) await selectEpisode(nextEpisode.id);
         };
       }
     } catch (error) { fail(error); }
+  }
+  function episodeNumberValue(value) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric;
+    const match = String(value ?? '').match(/(?:^|\D)(\d+(?:[.,]\d+)?)/);
+    return match ? Number(match[1].replace(',', '.')) : 0;
+  }
+  function homeCards(items, newEpisodes) {
+    if (!items.length) return '<p class="empty">Пока здесь пусто.</p>';
+    const newIds = new Set(newEpisodes.map(item => Number(item.series_id)));
+    return `<div class="home-rail" aria-label="Смотрю сейчас">${items.map(item => {
+      const watchedValue = episodeNumberValue(item.last_watched_episode_number);
+      const availableValue = episodeNumberValue(item.last_available_episode_number);
+      const watched = watchedValue > 0 ? watchedValue : 0;
+      const available = availableValue > 0 ? availableValue : 0;
+      const playbackIsNext = item.playback && Number(item.playback.episode_id) !== Number(item.last_watched_episode_id);
+      const hasNew = newIds.has(Number(item.series_id));
+      const isTrailer = /trailer|трейлер/i.test([item.series_type, item.last_watched_episode_number, item.last_available_episode_number].join(' '));
+      const hasCount = !isTrailer && available > 0;
+      const progress = hasCount ? Math.max(0, Math.min(100, Math.round(watched / available * 100))) : null;
+      const progressMarkup = hasCount ? `<span class="home-card-progress" role="progressbar" aria-label="${watched} из ${available} серий" aria-valuenow="${progress}" aria-valuemin="0" aria-valuemax="100"><span style="width:${progress}%"></span></span>` : '';
+      const badge = hasNew ? '<span class="home-new-dot" aria-label="Новая серия" title="Новая серия"></span>' : '';
+      const poster = item.poster_url
+        ? `<div class="home-poster"><div class="poster-skeleton" aria-hidden="true"></div><img src="${esc(item.poster_url)}" alt="" loading="lazy">${badge}${progressMarkup}</div>`
+        : `<div class="home-poster poster-fallback">${badge}${progressMarkup}</div>`;
+      const countText = isTrailer ? '' : hasCount ? `${watched} из ${available}` : watched > 0 ? `Просмотрено серий: ${watched}` : '';
+      const reliableNext = hasCount && watched + 1 === available;
+      const action = playbackIsNext ? 'Продолжить просмотр' : reliableNext ? `Серия ${watched + 1} →` : watched ? 'Смотреть дальше' : 'Смотреть';
+      return `<article class="home-card"><button class="home-card-button" data-home-watch="${esc(item.series_id)}">${poster}<strong title="${esc(item.title)}">${esc(item.title)}</strong>${countText ? `<span class="home-card-meta">${countText}</span>` : ''}<span class="home-card-action">${action}</span></button></article>`;
+    }).join('')}</div>`;
+  }
+  async function openHomeSeries(seriesId) {
+    const loaded = await details(seriesId);
+    if (!loaded || Number(state.selected?.item?.series_id) !== Number(seriesId)) return;
+    const playback = state.selected.playback;
+    const resumeEpisode = state.selected.episodes.find(item => Number(item.id) === Number(playback?.episode_id) && !item.watched);
+    if (resumeEpisode) return resumeDirect(resumeEpisode.id);
+    const nextEpisode = state.selected.episodes.find(item => !item.watched) || state.selected.episodes.find(item => Number(item.id) === Number(state.selected.item.last_available_episode_id)) || state.selected.episodes[state.selected.episodes.length - 1];
+    if (nextEpisode) await selectEpisode(nextEpisode.id);
+  }
+  function bindHomePullToRefresh() {
+    if (!root.addEventListener) return;
+    state.homePullCleanup?.();
+    const indicator = root.querySelector('#home-refresh-indicator');
+    let startY = null, startX = null, pulling = false, busy = false;
+    const start = event => {
+      if (state.view !== 'home' || window.scrollY > 0 || busy) return;
+      startY = event.touches?.[0]?.clientY ?? null;
+      startX = event.touches?.[0]?.clientX ?? null;
+      pulling = startY !== null && startX !== null;
+    };
+    const move = event => {
+      if (!pulling || startY === null) return;
+      const point = event.touches?.[0];
+      const distance = Math.max(0, (point?.clientY ?? startY) - startY);
+      const horizontal = Math.abs((point?.clientX ?? startX) - startX);
+      if (horizontal > distance) { pulling = false; if (indicator) indicator.hidden = true; return; }
+      if (indicator) { indicator.hidden = distance < 12; indicator.textContent = distance > 76 ? 'Отпустите, чтобы обновить' : 'Потяните вниз для обновления'; }
+    };
+    const end = async event => {
+      if (!pulling) return;
+      const distance = Math.max(0, (event.changedTouches?.[0]?.clientY ?? startY) - startY);
+      pulling = false; startY = null; startX = null;
+      if (indicator) indicator.hidden = true;
+      if (distance < 76 || busy || state.view !== 'home') return;
+      busy = true;
+      if (indicator) { indicator.hidden = false; indicator.textContent = 'Обновляем…'; }
+      await home();
+      busy = false;
+    };
+    root.addEventListener('touchstart', start, {passive: true});
+    root.addEventListener('touchmove', move, {passive: true});
+    root.addEventListener('touchend', end, {passive: true});
+    state.homePullCleanup = () => {
+      root.removeEventListener?.('touchstart', start);
+      root.removeEventListener?.('touchmove', move);
+      root.removeEventListener?.('touchend', end);
+    };
   }
   async function openNewEpisode(seriesId, episodeId) {
     const loaded = await details(seriesId);
@@ -116,10 +274,10 @@
       state.view = 'library';
       const data = await api('/api/library');
       const groups = [['watching', 'Смотрю'], ['rewatching', 'Пересматриваю'], ['planned', 'Запланировано'], ['on_hold', 'Отложено'], ['dropped', 'Брошено'], ['completed', 'Просмотрено']];
-      const hentaiItems = data.hentai_items || [];
+      const hentaiItems = state.adultCatalog ? (data.hentai_items || []) : [];
       const isUpdates = onlySeriesIds === true;
       const updateSeriesIds = isUpdates ? [...new Set((data.new_episodes || []).map(item => Number(item.series_id)))] : null;
-      root.innerHTML = '<section class="page-heading"><p class="eyebrow">Личная коллекция</p><div><h1>' + (isUpdates ? 'Обновления' : 'Моё аниме') + '</h1><span class="count-badge">' + esc(formatTitleCount(isUpdates ? updateSeriesIds.length : data.items?.length || 0)) + '</span></div></section><label class="search-field"><span>⌕</span><input id="library-search" placeholder="Поиск по названию"></label><div id="library-groups"></div><button class="action secondary back">Назад</button>';
+      root.innerHTML = '<section class="page-heading"><p class="eyebrow">Личная коллекция</p><div><h1>' + (isUpdates ? 'Обновления' : 'Моё аниме') + '</h1><span class="count-badge">' + esc(formatTitleCount(isUpdates ? updateSeriesIds.length : Object.values(data.groups || {}).reduce((sum, items) => sum + items.length, hentaiItems.length))) + '</span></div></section><label class="search-field"><span>⌕</span><input id="library-search" placeholder="Поиск по названию"></label><div id="library-groups"></div><button class="action secondary back">Назад</button>';
       useBack(); root.querySelector('.back').onclick = home;
       const search = root.querySelector('#library-search');
       const render = () => {
@@ -151,7 +309,7 @@
       const items = data.items || [];
       const updated = data.updated_at ? new Date(data.updated_at * 1000).toLocaleString('ru-RU') : '';
       root.innerHTML = `<section class="page-heading"><p class="eyebrow">${esc(label)} ${esc(year)}</p><h1>Новинки сезона</h1><p class="meta">Свежие сезоны, которые сейчас выходят и доступны с русским переводом.</p>${updated ? `<p class="meta">Обновлено: ${esc(updated)}${data.stale ? '. Обновление задерживается.' : ''}</p>` : ''}</section>${items.length ? `<section class="grid">${items.map(item => `<article class="card"><button data-seasonal="${esc(item.series_id)}">${item.poster_url ? `<img class="poster" src="${esc(item.poster_url)}" alt="" loading="lazy">` : '<div class="poster catalog-placeholder">Anime365</div>'}<strong>${esc(item.title)}</strong><div class="meta">${Number(item.score) > 0 ? `★ ${esc(item.score)} · ` : ''}Доступно серий: ${esc(item.available_episodes)}</div><span class="text-link">Смотреть ›</span></button></article>`).join('')}</section>` : `<p class="empty">${data.updated_at ? 'Пока нет выходящих новинок с русским переводом.' : data.refreshing ? 'Собираем новинки сезона. Список появится автоматически.' : 'Не удалось загрузить новинки. Повторим обновление позже.'}</p>`}<button class="action secondary" id="reload-seasonal">Обновить страницу</button><button class="action secondary back">Назад</button>`;
-      useBack(); root.querySelector('.back').onclick = home;
+      useBack(); root.querySelector('.back').onclick = more;
       root.querySelector('#reload-seasonal').onclick = seasonal;
       root.querySelectorAll('[data-seasonal]').forEach(button => button.onclick = async () => {
         try {
@@ -179,7 +337,7 @@
       else if (!items.length) content = '<p class="empty">Лента готовится. Она обновляется раз в неделю после импорта Shikimori.</p>';
       else content = `${recommendationCards(items)}${data.next_offset !== null ? '<button class="action secondary" id="more-recommendations">Показать ещё</button>' : ''}`;
       root.innerHTML = `<section class="page-heading"><p class="eyebrow">Для вас</p><h1>Рекомендации</h1><p class="meta">${updated ? `Обновлено: ${esc(updated)}.` : 'На основе оценок и жанров Shikimori.'}</p></section>${content}<button class="action secondary back">Назад</button>`;
-      useBack(); root.querySelector('.back').onclick = home;
+      useBack(); root.querySelector('.back').onclick = more;
       const more = root.querySelector('#more-recommendations');
       if (more) more.onclick = () => recommendations(data.next_offset, items);
       root.querySelectorAll('[data-recommendation]').forEach(button => button.onclick = async () => {
@@ -196,10 +354,11 @@
     } catch(error) { fail(error); }
   }
   async function search(provider = 'anime365') {
+    if (provider === 'hentai365' && !state.adultCatalog) return more();
     state.view = provider === 'hentai365' ? 'hentai' : 'search';
     const label = provider === 'hentai365' ? 'Hentai365' : 'Anime365';
     root.innerHTML = `<section class="page-heading"><p class="eyebrow">${label}</p><h1>Каталог</h1></section><label class="search-field"><span>⌕</span><input id="query" placeholder="Название на русском или английском"></label><button class="action search-action" id="go">Найти</button><section id="results"></section><button class="action secondary back">Назад</button>`;
-    useBack(); root.querySelector('.back').onclick = back;
+    useBack(); root.querySelector('.back').onclick = provider === 'hentai365' ? more : home;
     root.querySelector('#go').onclick = async () => { try { const endpoint = provider === 'hentai365' ? '/api/hentai/catalog' : '/api/catalog'; const data = await api(`${endpoint}?query=${encodeURIComponent(root.querySelector('#query').value)}`); root.querySelector('#results').innerHTML = catalogCards(data.items, provider); root.querySelectorAll('[data-catalog-series]').forEach(button => button.onclick = async () => { try { const item = data.items.find(row => Number(row.series_id) === Number(button.dataset.catalogSeries)); if (!item) throw new Error('Выбранный тайтл больше не найден. Повторите поиск.'); await api('/api/library', { method:'POST', body: JSON.stringify({ series_id:item.series_id, title:item.title, year:item.year == null ? null : String(item.year), series_type:item.series_type, provider }) }); await details(item.series_id); } catch(error) { fail(error); } }); } catch(error) { fail(error); } };
   }
   const hentai = () => search('hentai365');
@@ -209,7 +368,7 @@
     const count = item.imported_count ? ` · ${item.imported_count} тайтлов` : '';
     return `Фоновый импорт: ${label}${count}.`;
   }
-  async function settings() { try { state.view = 'settings'; const data = await api('/api/shikimori/status'); root.innerHTML = `<section class="page-heading"><p class="eyebrow">Профиль</p><h1>Настройки</h1></section><section class="panel"><h2>Shikimori</h2><p class="meta">${data.connected ? 'Подключён' : data.configured ? 'Не подключён' : 'OAuth не настроен на сервере'}</p>${data.connected ? `<label><input type="checkbox" id="shiki-sync" ${data.sync_enabled ? 'checked' : ''}> Синхронизировать просмотренные серии</label><label><input type="checkbox" id="shiki-auto-complete" ${data.auto_complete ? 'checked' : ''}> После последней серии переводить в «Просмотрено»</label><p class="meta">Авто-перевод срабатывает только после завершения последней доступной серии и только при включённой синхронизации.</p><p class="meta">${esc(backgroundImportText(data.background_import))}</p><button class="action secondary" id="save-shiki-settings">Сохранить</button><button class="action" id="import">Импортировать список</button><button class="action secondary" id="disconnect">Отключить</button>` : data.configured ? '<button class="action" id="connect">Подключить Shikimori</button>' : ''}</section><button class="action secondary back">Назад</button>`; root.querySelector('.back').onclick = back; if (data.connected) { root.querySelector('#disconnect').onclick = async () => { await api('/api/shikimori', {method:'DELETE'}); settings(); }; root.querySelector('#save-shiki-settings').onclick = async () => { try { await api('/api/shikimori/settings', {method:'PATCH',body:JSON.stringify({sync_enabled:root.querySelector('#shiki-sync').checked,auto_complete:root.querySelector('#shiki-auto-complete').checked})}); settings(); } catch(error) { fail(error); } }; root.querySelector('#import').onclick = shikimoriImport; } if (data.configured && !data.connected) root.querySelector('#connect').onclick = async () => { const result = await api('/api/shikimori/connect', {method:'POST'}); location.href = result.authorization_url; }; } catch(error) { fail(error); } }
+  async function settings() { try { state.view = 'settings'; const data = await api('/api/shikimori/status'); root.innerHTML = `<section class="page-heading"><p class="eyebrow">Профиль</p><h1>Настройки</h1></section><section class="panel"><label class="adult-toggle"><span>Показывать каталог 18+ на этом устройстве</span><input id="adult-catalog" type="checkbox" ${state.adultCatalog ? 'checked' : ''}></label></section><section class="panel"><h2>Shikimori</h2><p class="meta">${data.connected ? 'Подключён' : data.configured ? 'Не подключён' : 'OAuth не настроен на сервере'}</p>${data.connected ? `<label><input type="checkbox" id="shiki-sync" ${data.sync_enabled ? 'checked' : ''}> Синхронизировать просмотренные серии</label><label><input type="checkbox" id="shiki-auto-complete" ${data.auto_complete ? 'checked' : ''}> После последней серии переводить в «Просмотрено»</label><p class="meta">Авто-перевод срабатывает только после завершения последней доступной серии и только при включённой синхронизации.</p><p class="meta">${esc(backgroundImportText(data.background_import))}</p><button class="action secondary" id="save-shiki-settings">Сохранить</button><button class="action" id="import">Импортировать список</button><button class="action secondary" id="disconnect">Отключить</button>` : data.configured ? '<button class="action" id="connect">Подключить Shikimori</button>' : ''}</section><button class="action secondary back">Назад</button>`; root.querySelector('.back').onclick = more; root.querySelector('#adult-catalog').onchange = event => setAdultPreference(event.target.checked); if (data.connected) { root.querySelector('#disconnect').onclick = async () => { await api('/api/shikimori', {method:'DELETE'}); settings(); }; root.querySelector('#save-shiki-settings').onclick = async () => { try { await api('/api/shikimori/settings', {method:'PATCH',body:JSON.stringify({sync_enabled:root.querySelector('#shiki-sync').checked,auto_complete:root.querySelector('#shiki-auto-complete').checked})}); settings(); } catch(error) { fail(error); } }; root.querySelector('#import').onclick = shikimoriImport; } if (data.configured && !data.connected) root.querySelector('#connect').onclick = async () => { const result = await api('/api/shikimori/connect', {method:'POST'}); location.href = result.authorization_url; }; } catch(error) { fail(error); } }
   async function shikimoriImport() {
     let current;
     try { current = await api('/api/shikimori/status'); } catch(error) { fail(error); return; }
@@ -322,7 +481,9 @@
   async function details(seriesId, showAllEpisodes = false) {
     try {
       state.view = 'details';
-      const data = await api(`/api/library/${seriesId}`); state.selected = data;
+      const data = await api(`/api/library/${seriesId}`);
+      if (data.item.provider === 'hentai365' && !state.adultCatalog) { more(); return false; }
+      state.selected = data;
       const p = data.playback;
       const nextEpisode = data.episodes.find(item => !item.watched) || data.episodes[data.episodes.length - 1];
       const resumeEpisode = data.episodes.find(item => Number(item.id) === Number(p?.episode_id));
@@ -394,8 +555,8 @@
       await selectEpisode(episodeId);
     }
   }
-  async function selectEpisode(episodeId) { try { state.episode = state.selected.episodes.find(item => item.id === episodeId); const data = await api(`/api/episodes/${episodeId}/translations?series_id=${encodeURIComponent(state.selected.item.series_id)}`); root.innerHTML = `<h1>Серия ${esc(state.episode.number)}</h1>${state.episode.watched ? '<p class="meta">Серия отмечена просмотренной.</p>' : '<section class="panel"><button class="action secondary" id="mark-watched">Отметить просмотренной</button><p class="meta">Серия и предыдущие будут отмечены просмотренными.</p></section>'}${data.groups.map(group => `<section class="panel"><h2>${esc(group.label)}</h2>${group.items.map(item => `<button class="action secondary" data-translation="${item.id}">${esc(item.authorsSummary || item.title || 'Перевод')}</button>`).join('')}</section>`).join('')}<button class="action secondary back">Назад</button>`; useBack(); root.querySelector('.back').onclick = () => details(state.selected.item.series_id); const markWatched = root.querySelector('#mark-watched'); if (markWatched) markWatched.onclick = async () => { try { markWatched.disabled = true; markWatched.textContent = 'Отмечаем…'; await api(`/api/library/${state.selected.item.series_id}/episodes/${state.episode.id}/watched`, {method:'POST'}); details(state.selected.item.series_id); } catch(error) { fail(error); } }; root.querySelectorAll('[data-translation]').forEach(button => button.onclick = () => qualities(Number(button.dataset.translation))); } catch(error) { fail(error); } }
-  async function qualities(translationId) { try { state.translation = translationId; const data = await api(`/api/translations/${translationId}/qualities?series_id=${encodeURIComponent(state.selected.item.series_id)}`); root.innerHTML = `<h1>Качество</h1>${data.items.map(value => `<section class="panel"><strong>${value}p</strong><div><button class="action" data-watch="${value}">Смотреть</button><button class="action secondary" data-download="${value}">Скачать</button></div></section>`).join('')}<button class="action secondary back">Назад</button>`; root.querySelector('.back').onclick = () => selectEpisode(state.episode.id); root.querySelectorAll('[data-watch]').forEach(button => button.onclick = () => player(Number(button.dataset.watch))); root.querySelectorAll('[data-download]').forEach(button => button.onclick = () => downloadOptions(Number(button.dataset.download))); } catch(error) { fail(error); } }
+  async function selectEpisode(episodeId) { try { state.episode = state.selected.episodes.find(item => item.id === episodeId); const data = await api(`/api/episodes/${episodeId}/translations?series_id=${encodeURIComponent(state.selected.item.series_id)}`); state.view = 'details'; root.innerHTML = `<h1>Серия ${esc(state.episode.number)}</h1>${state.episode.watched ? '<p class="meta">Серия отмечена просмотренной.</p>' : '<section class="panel"><button class="action secondary" id="mark-watched">Отметить просмотренной</button><p class="meta">Серия и предыдущие будут отмечены просмотренными.</p></section>'}${data.groups.map(group => `<section class="panel"><h2>${esc(group.label)}</h2>${group.items.map(item => `<button class="action secondary" data-translation="${item.id}">${esc(item.authorsSummary || item.title || 'Перевод')}</button>`).join('')}</section>`).join('')}<button class="action secondary back">Назад</button>`; useBack(); root.querySelector('.back').onclick = () => details(state.selected.item.series_id); const markWatched = root.querySelector('#mark-watched'); if (markWatched) markWatched.onclick = async () => { try { markWatched.disabled = true; markWatched.textContent = 'Отмечаем…'; await api(`/api/library/${state.selected.item.series_id}/episodes/${state.episode.id}/watched`, {method:'POST'}); details(state.selected.item.series_id); } catch(error) { fail(error); } }; root.querySelectorAll('[data-translation]').forEach(button => button.onclick = () => qualities(Number(button.dataset.translation))); } catch(error) { fail(error); } }
+  async function qualities(translationId) { try { state.translation = translationId; const data = await api(`/api/translations/${translationId}/qualities?series_id=${encodeURIComponent(state.selected.item.series_id)}`); state.view = 'details'; root.innerHTML = `<h1>Качество</h1>${data.items.map(value => `<section class="panel"><strong>${value}p</strong><div><button class="action" data-watch="${value}">Смотреть</button><button class="action secondary" data-download="${value}">Скачать</button></div></section>`).join('')}<button class="action secondary back">Назад</button>`; root.querySelector('.back').onclick = () => selectEpisode(state.episode.id); root.querySelectorAll('[data-watch]').forEach(button => button.onclick = () => player(Number(button.dataset.watch))); root.querySelectorAll('[data-download]').forEach(button => button.onclick = () => downloadOptions(Number(button.dataset.download))); } catch(error) { fail(error); } }
   function downloadOptions(quality) { root.innerHTML = `<h1>Скачать</h1><p class="meta">${esc(state.selected.item.title)} · серия ${esc(state.episode.number)} · ${quality}p</p><section class="panel"><strong>Эта серия</strong><p class="meta">Подготовим MKV без перекодирования.</p><button class="action" id="download-browser">Скачать в Mini App</button><button class="action secondary" id="download-telegram">Отправить в Telegram</button></section><section class="panel"><strong>В поездку</strong><p class="meta">Поставить в очередь следующую серию или несколько непросмотренных.</p><button class="action secondary" id="download-travel">Выбрать серии</button></section><button class="action secondary back">Назад</button>`; root.querySelector('#download-browser').onclick = () => queueDownload(quality, 'browser'); root.querySelector('#download-telegram').onclick = () => queueDownload(quality, 'telegram'); root.querySelector('#download-travel').onclick = () => travelMode(quality); root.querySelector('.back').onclick = () => qualities(state.translation); }
   async function queueDownload(quality, delivery) { try { const job = await api('/api/downloads', {method:'POST',body:JSON.stringify({series_id:state.selected.item.series_id,episode_id:state.episode.id,translation_id:state.translation,quality,delivery})}); root.innerHTML = `<h1>Подготовка поставлена в очередь</h1><p class="meta">Серия ${esc(state.episode.number)} · ${quality}p</p><p id="job-status">${esc(job.status)}</p><button class="action secondary" id="downloads">Все загрузки</button><button class="action secondary back">К аниме</button>`; root.querySelector('#downloads').onclick = downloads; root.querySelector('.back').onclick = () => details(state.selected.item.series_id); const poll = async () => { const current = await api('/api/downloads/' + encodeURIComponent(job.id)); const node = root.querySelector('#job-status'); if (!node) return; node.textContent = jobStatus(current.status); if (current.status === 'ready') { const ticket = await api('/api/downloads/' + encodeURIComponent(job.id) + '/ticket', {method:'POST'}); node.innerHTML = `<a class="action" href="${ticket.url}">Скачать готовый MKV</a>`; return; } if (current.status === 'queued' || current.status === 'preparing') setTimeout(() => poll().catch(()=>{}), 2500); }; setTimeout(() => poll().catch(()=>{}), 1500); } catch(error) { fail(error); } }
   const jobStatus = status => ({queued:'В очереди',preparing:'Подготавливается',ready:'Готово',sent:'Отправлено в Telegram',failed:'Не удалось подготовить',cancelled:'Отменено',expired:'Срок хранения истёк'}[status] || status);
@@ -524,6 +685,60 @@
     });
     instance.attachMedia(video);
   }
+  function playerExtrasMarkup(episodes, episode, subtitles) {
+    return `<div class="video-tools" role="group" aria-label="Управление видео">
+      <button type="button" class="video-skip" title="Вперёд на 85 секунд">+85 с</button>
+      <label class="video-speed"><select aria-label="Скорость воспроизведения"><option value="1">1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option></select></label>
+      ${subtitles ? `<details class="video-captions"><summary aria-label="Настройки субтитров" title="Субтитры">CC</summary>
+        <div class="captions-panel"><p id="subtitle-status" role="status">Загружаем субтитры…</p>
+        <label class="caption-size" hidden>Размер текста <select aria-label="Размер субтитров"><option value="default">Обычный</option><option value="large">Крупный</option><option value="larger">Очень крупный</option></select></label></div></details>` : ''}
+      <button type="button" id="fullscreen" aria-label="На весь экран" title="На весь экран">⛶</button>
+    </div>`;
+  }
+  function playerEpisodeList(episodes, current) {
+    return `<section class="season-episodes"><h2>Серии</h2><div class="season-scroll">${episodes.map(ep =>
+      `<button type="button" data-player-episode="${esc(ep.id)}"${ep.id === current.id ? ' aria-current="true" disabled' : ''}>
+      ${ep.watched ? '<span aria-label="Просмотрено">✓</span> ' : ''}${esc(ep.number)}</button>`).join('')}</div></section>`;
+  }
+  function bindPlayerExtras(video, episodes, current, switchEpisode) {
+    const surface = video.closest('.player-surface');
+    const seek = delta => {
+      if (Number.isFinite(video.duration)) {
+        video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + delta));
+      }
+    };
+    surface.querySelector('.video-skip').onclick = () => seek(85);
+    surface.querySelector('.video-speed select').onchange = event => {
+      video.playbackRate = Number(event.target.value);
+    };
+    const size = surface.querySelector('.caption-size select');
+    if (size) size.onchange = () => { video.dataset.captionSize = size.value; };
+    let previous;
+    const tap = event => {
+      if (event.pointerType !== 'touch' || !event.isPrimary) return;
+      const rect = video.getBoundingClientRect();
+      const x = (event.clientX - rect.left) / rect.width;
+      const side = x < 0.32 ? -1 : x > 0.68 ? 1 : 0;
+      if (!side || event.clientY > rect.bottom - 44) { previous = null; return; }
+      if (previous && previous.side === side && event.timeStamp - previous.time < 350 &&
+          Math.hypot(event.clientX - previous.x, event.clientY - previous.y) < 36) {
+        event.preventDefault();
+        seek(side * 10);
+        previous = null;
+      } else {
+        previous = {side, time: event.timeStamp, x: event.clientX, y: event.clientY};
+      }
+    };
+    video.addEventListener('pointerup', tap);
+    const list = root.querySelector('.season-scroll');
+    const active = list.querySelector('[aria-current]');
+    if (active) list.scrollLeft = active.offsetLeft - (list.clientWidth - active.offsetWidth) / 2;
+    list.onclick = event => {
+      const target = event.target.closest('[data-player-episode]');
+      if (target && !target.disabled) switchEpisode(Number(target.dataset.playerEpisode));
+    };
+    return () => { video.removeEventListener('pointerup', tap); list.onclick = null; };
+  }
   async function requestVideoFullscreen(video) {
     // A video-only native fullscreen surface excludes the libass canvas.
     const target = video.closest?.('.player-surface') || video;
@@ -554,7 +769,8 @@
     };
     const render = () => {
       document.body.classList.toggle('player-expanded', active);
-      button.textContent = active ? 'Выйти из полного экрана' : 'На весь экран';
+      button.title = active ? 'Выйти из полного экрана' : 'На весь экран';
+      button.setAttribute?.('aria-label', button.title);
       if (active) { backButton?.hide(); reveal(); }
       else {
         clearTimeout(timer);
@@ -631,11 +847,23 @@
     let objectUrl;
     let renderer;
     let toggle;
+    let resizeSelect;
     const track = document.createElement('track');
     track.kind = 'subtitles'; track.srclang = 'ru'; track.label = 'Субтитры'; track.default = true;
     track.addEventListener('load', () => {
       track.track.mode = 'showing';
-      status.textContent = 'Субтитры включены.';
+      const size = status.parentElement?.querySelector('.caption-size');
+      if (size) size.hidden = false;
+      toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.textContent = 'Скрыть субтитры';
+      toggle.onclick = () => {
+        const show = track.track.mode !== 'showing';
+        track.track.mode = show ? 'showing' : 'disabled';
+        toggle.textContent = show ? 'Скрыть субтитры' : 'Показать субтитры';
+      };
+      status.after(toggle);
+      status.textContent = 'Русские субтитры';
     });
     track.addEventListener('error', () => { status.textContent = 'Не удалось прочитать субтитры.'; });
     (async () => {
@@ -672,6 +900,32 @@
             }
           }
           const fonts = [...new Set([...families].flatMap(name => availableFonts[name] || []))];
+          // Change declared font sizes only on request. Keep line layout tags,
+          // drawings, timing and an untouched original for the default setting.
+          const resizedScript = () => {
+            const factor = {large: 1.25, larger: 1.5}[resizeSelect?.value];
+            if (!factor) return body;
+            let inStyles = false, sizeIndex = -1;
+            return body.replace(/[^\r\n]+/g, line => {
+              const trimmed = line.trim();
+              if (trimmed.startsWith('[')) {
+                inStyles = /^\[v4\+? styles\]$/i.test(trimmed);
+                sizeIndex = -1;
+              }
+              if (!inStyles) return line;
+              const colon = line.indexOf(':');
+              if (colon < 0) return line;
+              const values = line.slice(colon + 1).split(',');
+              if (/^Format:/i.test(trimmed)) {
+                sizeIndex = values.findIndex(key => key.trim().toLowerCase() === 'fontsize');
+              } else if (/^Style:/i.test(trimmed) && sizeIndex >= 0 && Number(values[sizeIndex]) > 0) {
+                values[sizeIndex] = String(Number(values[sizeIndex]) * factor);
+                return line.slice(0, colon + 1) + values.join(',');
+              }
+              return line;
+            });
+          };
+          let visible = true;
           video.setAttribute('controlslist', 'nofullscreen');
           video.disablePictureInPicture = true;
           renderer = new SubtitlesOctopus({
@@ -682,20 +936,25 @@
             targetFps: 60,
             onReady: () => {
               if (controller.signal.aborted) return;
+              const size = status.parentElement?.querySelector('.caption-size');
+              if (size) {
+                resizeSelect = size.querySelector('select');
+                resizeSelect.onchange = () => { if (visible) renderer.setTrack(resizedScript()); };
+                size.hidden = false;
+              }
               renderer.setRate(video.playbackRate);
               renderer.setIsPaused(video.paused, video.currentTime);
-              status.textContent = 'Субтитры включены (libass).';
+              status.textContent = 'Русские субтитры';
             },
             onError: () => { if (!controller.signal.aborted) status.textContent = 'Не удалось запустить ASS/SSA-субтитры.'; },
           });
           toggle = document.createElement('button');
-          toggle.className = 'action secondary player-subtitle-toggle';
+          toggle.type = 'button';
           toggle.textContent = 'Скрыть субтитры';
-          let visible = true;
           toggle.onclick = () => {
             if (!renderer?.worker) return;
             visible = !visible;
-            if (visible) renderer.setTrack(body); else renderer.freeTrack();
+            if (visible) renderer.setTrack(resizedScript()); else renderer.freeTrack();
             toggle.textContent = visible ? 'Скрыть субтитры' : 'Показать субтитры';
           };
           status.after(toggle);
@@ -715,6 +974,7 @@
       controller.abort();
       track.remove();
       toggle?.remove();
+      if (resizeSelect) resizeSelect.onchange = null;
       if (renderer?.worker) renderer.dispose();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
@@ -729,9 +989,111 @@
     return candidates.find(item => author(item) === author(selected)) || null;
   }
 
-  async function player(quality) { try { state.view = 'player'; const seriesId = state.selected.item.series_id; const episode = state.episode; const translationId = state.translation; const episodes = state.selected.episodes; const nextEpisode = episodes[episodes.findIndex(item => item.id === episode.id) + 1]; let active = true; let disposed = false; let pending = Promise.resolve(); const result = await api('/api/play', {method:'POST', body:JSON.stringify({series_id:seriesId, episode_id:episode.id, translation_id:translationId, quality})}); root.innerHTML = `<section class="player-page"><h1 class="player-heading">${esc(state.selected.item.title)} <span>· Серия ${esc(state.episode.number)}</span></h1><div class="player-surface"><video controls playsinline></video><button class="player-exit" type="button">Выйти из полного экрана</button></div>${result.subtitle_url ? '<p class="meta player-subtitle-status" id="subtitle-status">Загружаем субтитры…</p>' : ''}<p class="player-actions"><button class="action" id="complete-episode">${nextEpisode ? 'Просмотрено → Следующая серия' : 'Отметить просмотренной'}</button><button class="action secondary" id="fullscreen">На весь экран</button><button class="action secondary" id="fallback">Использовать proxy-поток</button></p><p class="meta" id="player-progress-status" role="status"></p><button class="action secondary back player-back">Назад</button></section>`; const video = root.querySelector('video'); const fullscreenButton = root.querySelector('#fullscreen'); const stopWatchingFullscreen = watchPlayerFullscreen(video, fullscreenButton); const stopSubtitles = result.subtitle_url ? loadPlayerSubtitles(video, result.subtitle_url, root.querySelector('#subtitle-status'), result.subtitle_fonts) : () => {}; state.player = {video, cleanup: () => { disposed = true; active = false; stopWatchingFullscreen(); stopSubtitles(); video.pause(); destroyHls(); }}; const hls = isHlsSource(result.media_url); let usingProxy = false; const fallback = async () => { if (!active || usingProxy) return; usingProxy = true; const button = root.querySelector('#fallback'); button.disabled = true; button.textContent = 'Подключаем proxy…'; await setVideoSource(video, result.proxy_url, hls); video.play().catch(()=>{}); button.textContent = 'Proxy-поток подключён'; }; const shouldResume = Number(state.resumeEpisodeId) === Number(episode.id); const resumeAt = shouldResume ? Number(state.resumePosition) || 0 : 0; if (shouldResume) video.addEventListener('loadedmetadata', () => { if (resumeAt > 0 && Number.isFinite(video.duration)) video.currentTime = Math.min(resumeAt, Math.max(0, video.duration - 1)); video.play().catch(() => {}); state.resumeEpisodeId = null; state.resumePosition = 0; }, {once:true}); const start = () => setVideoSource(video, result.media_url, hls, () => fallback().catch(()=>{})); await start(); video.addEventListener('error', () => { if (!usingProxy) fallback().catch(()=>{}); }); let last = 0;
-      const save = (ended=false) => {
-        if (!active || (!ended && (!Number.isFinite(video.duration) || !video.duration || Date.now()-last < 15000))) return pending;
+  async function player(quality) {
+    try {
+      state.view = 'player';
+      const seriesId = state.selected.item.series_id;
+      const episode = state.episode;
+      const translationId = state.translation;
+      const episodes = state.selected.episodes;
+      const nextEpisode = episodes[episodes.findIndex(item => item.id === episode.id) + 1];
+      let active = true, disposed = false, pending = Promise.resolve(), countdownTimer = null;
+      let last = 0, usingProxy = false, primaryAction = null;
+      const result = await api('/api/play', {method:'POST', body:JSON.stringify({series_id:seriesId, episode_id:episode.id, translation_id:translationId, quality})});
+      const episodeType = ({tv:'ТВ', ona:'ONA', ova:'OVA', movie:'Фильм', special:'Спецвыпуск'}[episode.type] || episode.type || 'Эпизод');
+      const episodeIndex = String(episode.number).match(/^(?:(?:ONA|OVA|TV)\s+)?(\d+(?:[.,]\d+)?)(?:\s+серия)?$/i);
+      const episodeLabel = episodeIndex ? `Серия ${episodeIndex[1]}` : episode.number;
+      root.innerHTML = `<section class="player-page"><header class="player-heading"><div><h1>${esc(state.selected.item.title)}</h1><p class="meta">${esc(episodeLabel)} · ${esc(episodeType)}</p></div><button class="player-back action secondary" type="button">Назад</button></header><div class="player-surface"><video controls playsinline></video>${playerExtrasMarkup(episodes, episode, Boolean(result.subtitle_url))}<button class="player-exit" type="button">Выйти из полного экрана</button><section class="player-countdown" id="player-countdown" hidden aria-live="polite"><p>Серия закончена. Следующая начнётся через <strong id="countdown-seconds">10</strong> сек.</p><button class="action secondary" id="cancel-countdown">Отмена</button><button class="action" id="countdown-next">Следующая серия</button></section></div>${playerEpisodeList(episodes,episode)}<div class="player-controls"><button class="action" id="complete-episode" hidden></button><details class="player-more"><summary aria-label="Дополнительные действия">⋯</summary><button class="action secondary" id="fallback">Использовать резервный поток</button></details></div><p class="meta" id="player-progress-status" role="status" aria-live="polite"></p></section>`;
+      const video = root.querySelector('video');
+      const fullscreenButton = root.querySelector('#fullscreen');
+      const stopWatchingFullscreen = watchPlayerFullscreen(video, fullscreenButton);
+      const stopSubtitles = result.subtitle_url
+        ? loadPlayerSubtitles(video, result.subtitle_url, root.querySelector('#subtitle-status'), result.subtitle_fonts)
+        : () => {};
+      const stopExtras = bindPlayerExtras(video, episodes, episode, async episodeId => {
+        await save(true);
+        state.player?.cleanup(); state.player = null;
+        await selectEpisode(Number(episodeId));
+      });
+      const telegramBack = telegram?.BackButton;
+      const domBack = root.querySelector('.player-back');
+      const leavePlayer = async () => {
+        await save(true);
+        state.player?.cleanup(); state.player = null;
+        await details(seriesId);
+      };
+      if (typeof releaseNavigationButtons === 'function') releaseNavigationButtons();
+      if (initData && telegramBack?.show && telegramBack?.onClick) {
+        domBack.hidden = true;
+        telegramBack.show(); telegramBack.onClick(leavePlayer);
+      } else domBack.onclick = leavePlayer;
+      const telegramMain = telegram?.MainButton;
+      const domAction = root.querySelector('#complete-episode');
+      const mainAvailable = Boolean(initData && telegramMain?.show && telegramMain?.onClick && telegramMain?.setText);
+      telegramMain?.enable?.();
+      telegramMain?.hide?.();
+      const hideMain = () => { telegramMain?.hide?.(); };
+      let primaryVisible;
+      const refreshMainVisibility = () => {
+        const fullscreen = Boolean(telegram?.isFullscreen || (typeof document !== 'undefined' &&
+          (document.fullscreenElement || document.body?.classList.contains('player-expanded'))));
+        if (mainAvailable && primaryVisible && !fullscreen) telegramMain.show();
+        else hideMain();
+      };
+      const onFullscreenChange = () => refreshMainVisibility();
+      if (typeof document !== 'undefined') document.addEventListener?.('fullscreenchange', onFullscreenChange);
+      telegram?.onEvent?.('fullscreenChanged', onFullscreenChange);
+      const updatePrimaryAction = visible => {
+        if (primaryVisible === visible) return;
+        primaryVisible = visible;
+        const label = nextEpisode ? 'Следующая серия' : 'Завершить серию';
+        domAction.textContent = label;
+        domAction.hidden = !visible || mainAvailable;
+        if (mainAvailable) {
+          telegramMain.setText(label);
+          refreshMainVisibility();
+        }
+      };
+      const clickPrimary = async () => {
+        if (primaryAction) await primaryAction();
+      };
+      telegramMain?.onClick?.(clickPrimary);
+      const hls = isHlsSource(result.media_url);
+      const fallback = async () => {
+        if (!active || usingProxy) return;
+        usingProxy = true;
+        const resumeSourceAt = Number(video.currentTime) || 0;
+        const button = root.querySelector('#fallback');
+        button.disabled = true;
+        button.textContent = 'Подключаем резервный поток…';
+        const status = root.querySelector('#player-progress-status');
+        status.textContent = 'Не удалось открыть основной поток. Подключаем резервный…';
+        try {
+          await save(true).catch(() => {});
+          video.addEventListener('loadedmetadata', () => {
+            if (resumeSourceAt > 0 && Number.isFinite(video.duration)) video.currentTime = Math.min(resumeSourceAt, Math.max(0, video.duration - 1));
+          }, {once:true});
+          await setVideoSource(video, result.proxy_url, hls);
+          video.play().catch(() => {});
+          button.textContent = 'Резервный поток подключён';
+          status.textContent = 'Воспроизведение продолжено через резервный поток.';
+        } catch (_) {
+          button.disabled = false;
+          button.textContent = 'Повторить резервный поток';
+          status.textContent = 'Резервный поток сейчас недоступен.';
+          usingProxy = false;
+        }
+      };
+      const shouldResume = Number(state.resumeEpisodeId) === Number(episode.id);
+      const resumeAt = shouldResume ? Number(state.resumePosition) || 0 : 0;
+      if (shouldResume) video.addEventListener('loadedmetadata', () => {
+        if (resumeAt > 0 && Number.isFinite(video.duration)) video.currentTime = Math.min(resumeAt, Math.max(0, video.duration - 1));
+        video.play().catch(() => {});
+        state.resumeEpisodeId = null; state.resumePosition = 0;
+      }, {once:true});
+      const start = () => setVideoSource(video, result.media_url, hls, () => fallback().catch(() => {}));
+      const save = (force = false, ended = false) => {
+        if ((!active && !force) || (!force && (!Number.isFinite(video.duration) || !video.duration || Date.now() - last < 15000))) return pending;
         last = Date.now();
         const body = JSON.stringify({series_id:seriesId, episode_id:episode.id,
           position_seconds:video.currentTime || 0,
@@ -739,23 +1101,30 @@
         pending = pending.catch(() => {}).then(() => api('/api/progress', {method:'POST', body}));
         return pending;
       };
-      video.addEventListener('timeupdate', () => save(false).catch(() => {}));
-      video.addEventListener('pause', () => save(false).catch(() => {}));
-      video.addEventListener('ended', () => save(true).catch(() => {}));
-      const completeButton = root.querySelector('#complete-episode');
-      completeButton.onclick = async () => {
-        completeButton.disabled = true;
+      const countdownNode = root.querySelector('#player-countdown');
+      const cancelCountdown = () => {
+        if (countdownTimer) clearInterval(countdownTimer);
+        countdownTimer = null;
+        countdownNode.hidden = true;
+      };
+      const completeCurrent = async () => {
+        if (!active) return;
+        cancelCountdown();
+        domAction.disabled = true;
+        if (mainAvailable) telegramMain.disable?.();
         const status = root.querySelector('#player-progress-status');
         active = false;
         video.pause();
         try {
-          await pending.catch(() => {});
+          await save(true);
           await api(`/api/library/${seriesId}/episodes/${episode.id}/watched`, {method:'POST'});
           if (disposed) return;
           episode.watched = true;
           if (!nextEpisode) {
-            completeButton.textContent = '✓ Просмотрено';
-            status.textContent = 'Серия и предыдущие отмечены просмотренными.';
+            domAction.textContent = '✓ Серия просмотрена';
+            domAction.hidden = mainAvailable;
+            hideMain();
+            status.textContent = 'Серия отмечена просмотренной.';
             return;
           }
           status.textContent = 'Подбираем перевод следующей серии…';
@@ -765,25 +1134,63 @@
           ]);
           if (disposed) return;
           const translation = matchingPlayerTranslation(current.groups, next.groups, translationId);
-          if (!translation) {
-            state.player?.cleanup(); state.player = null;
-            await selectEpisode(nextEpisode.id);
-            return;
-          }
+          if (!translation) { state.player?.cleanup(); state.player = null; await selectEpisode(nextEpisode.id); return; }
           const available = await api(`/api/translations/${translation.id}/qualities?series_id=${seriesId}`);
           if (disposed) return;
-          state.player?.cleanup(); state.player = null;
           state.episode = nextEpisode;
           state.translation = translation.id;
-          if (available.items.some(value => Number(value) === Number(quality))) await player(quality);
+          state.player?.cleanup(); state.player = null;
+          if (available.items.some(value => Number(value) === Number(quality))) { await player(quality); state.player?.video.play().catch(() => {}); }
           else await qualities(translation.id);
         } catch (error) {
           if (disposed) return;
-          status.textContent = error.message || String(error);
+          status.textContent = error.message || 'Не удалось открыть следующую серию.';
           active = true;
-          completeButton.disabled = false;
+          domAction.disabled = false;
+          if (mainAvailable) telegramMain.enable?.();
         }
       };
-      fullscreenButton.onclick = () => playerFullscreen(video, fullscreenButton); root.querySelector('#fallback').onclick = () => fallback().catch(error => fail(error)); root.querySelector('.back').onclick = () => { save(false); state.player?.cleanup(); state.player = null; details(seriesId); }; } catch(error) { destroyHls(); fail(error); } }
-  api('/api/me').then(async () => { const params = new URLSearchParams(location.search); const seriesId = Number(params.get('series_id')); const episodeId = Number(params.get('episode_id')); if (seriesId) { await details(seriesId); if (episodeId && state.selected.episodes.some(item => item.id === episodeId)) await selectEpisode(episodeId); } else await home(); }).catch(error => { root.innerHTML = `<p class="error">${esc(error.message)}${initData ? '' : '<br>Откройте страницу из Telegram.'}</p>`; });
+      primaryAction = completeCurrent;
+      domAction.onclick = clickPrimary;
+      root.querySelector('#fallback').onclick = () => fallback();
+      root.querySelector('#cancel-countdown').onclick = cancelCountdown;
+      root.querySelector('#countdown-next').onclick = completeCurrent;
+      const startCountdown = () => {
+        if (!nextEpisode || countdownTimer || disposed) return;
+        countdownNode.hidden = false;
+        let remaining = 10;
+        const seconds = root.querySelector('#countdown-seconds');
+        seconds.textContent = String(remaining);
+        countdownTimer = setInterval(() => {
+          remaining -= 1;
+          seconds.textContent = String(Math.max(0, remaining));
+          if (remaining <= 0) { cancelCountdown(); completeCurrent(); }
+        }, 1000);
+      };
+      video.addEventListener('seeking', () => {
+        if (countdownTimer && Number.isFinite(video.duration) && video.currentTime < video.duration - 1) cancelCountdown();
+      });
+      video.addEventListener('timeupdate', () => {
+        save(false).catch(() => {});
+        if (!Number.isFinite(video.duration) || !video.duration) return;
+        if (countdownTimer && video.currentTime < video.duration - 1) cancelCountdown();
+        updatePrimaryAction(video.duration - video.currentTime <= 120);
+      });
+      video.addEventListener('pause', () => save(false).catch(() => {}));
+      video.addEventListener('ended', () => { save(true, true).catch(() => {}); startCountdown(); updatePrimaryAction(true); });
+      fullscreenButton.onclick = () => playerFullscreen(video, fullscreenButton);
+      domBack.onclick ||= leavePlayer;
+      state.player = {video, flushProgress: () => save(true), cleanup: () => {
+        disposed = true; active = false; cancelCountdown(); hideMain();
+        if (typeof document !== 'undefined') document.removeEventListener?.('fullscreenchange', onFullscreenChange);
+        telegram?.offEvent?.('fullscreenChanged', onFullscreenChange);
+        telegramBack?.offClick?.(leavePlayer); telegramBack?.hide?.();
+        telegramMain?.offClick?.(clickPrimary);
+        stopWatchingFullscreen(); stopSubtitles(); stopExtras(); video.pause(); destroyHls();
+      }};
+      await start();
+      video.addEventListener('error', () => { if (!usingProxy) fallback().catch(() => {}); });
+    } catch (error) { destroyHls(); fail(error); }
+  }
+  api('/api/me').then(async user => { loadAdultPreference(user.user_id); const params = new URLSearchParams(location.search); const seriesId = Number(params.get('series_id')); const episodeId = Number(params.get('episode_id')); if (seriesId) { const opened = await details(seriesId); if (opened && episodeId && state.selected.episodes.some(item => item.id === episodeId)) await selectEpisode(episodeId); } else await home(); }).catch(error => { root.innerHTML = `<p class="error">${esc(error.message)}${initData ? '' : '<br>Откройте страницу из Telegram.'}</p>`; });
 })();

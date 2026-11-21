@@ -131,11 +131,14 @@ test('ASS is passed intact to libass without creating a native text track', asyn
   const body = fs.readFileSync('tests/fixtures/rendering.ass', 'utf8');
   let options, disposed = false, freed = false, restored;
   const button = {remove() {}};
-  const status = {after() {}};
+  const sizeSelect = {value:'default'};
+  const sizeLabel = {hidden:true, querySelector: () => sizeSelect};
+  const status = {after() {}, parentElement:{querySelector: () => sizeLabel}};
   const context = {
     document: {createElement: tag => tag === 'button' ? button : {addEventListener() {}, remove() {}}},
     initData: '', AbortController,
     SubtitlesOctopus: function(value) {
+      this.setRate = this.setIsPaused = () => {};
       options = value; this.worker = {}; this.dispose = () => disposed = true;
       this.freeTrack = () => freed = true; this.setTrack = value => restored = value;
     },
@@ -151,6 +154,13 @@ test('ASS is passed intact to libass without creating a native text track', asyn
   assert.equal(options.workerUrl, '/assets/subtitles-octopus-worker.js');
   button.onclick(); assert.ok(freed);
   button.onclick(); assert.equal(restored, body);
+  options.onReady();
+  assert.equal(sizeLabel.hidden, false);
+  sizeSelect.value = 'larger'; sizeSelect.onchange();
+  assert.notEqual(restored, body);
+  assert.equal(restored.split('[Events]')[1], body.split('[Events]')[1]);
+  sizeSelect.value = 'default'; sizeSelect.onchange();
+  assert.equal(restored, body);
   cleanup(); assert.ok(disposed);
 });
 
@@ -238,16 +248,21 @@ test('libass repeated resize preserves paused subtitle pixels when geometry is u
   assert.equal(messages, 2);
 });
 
-function episodePlayer({last = false, missingTranslation = false, missingQuality = false} = {}) {
-  const events = {}, calls = [], nodes = {};
-  const video = {duration: 100, currentTime: 25, pause() {events.pause?.();},
-    play: async () => {}, addEventListener(name, fn) {events[name] = fn;}};
-  for (const key of ['#fullscreen', '#fallback', '#complete-episode', '#player-progress-status', '.back']) nodes[key] = {};
+function episodePlayer({last = false, missingTranslation = false, missingQuality = false, telegramEnabled = false, duration = 100} = {}) {
+  const events = {}, calls = [], nodes = {}, intervals = new Map(); let intervalId = 0, playCount = 0;
+  const video = {duration, currentTime: 25, pause() {events.pause?.();},
+    play: async () => {playCount++;}, addEventListener(name, fn) {events[name] = fn;}};
+  for (const key of ['#fullscreen', '#fallback', '#complete-episode', '#player-progress-status', '.player-back', '#player-countdown', '#countdown-seconds', '#cancel-countdown', '#countdown-next']) nodes[key] = {};
   const episodes = [{id: 10, number: '1'}, {id: 20, number: '2'}];
   const groups = id => [{kind: 'sub', language: 'ru', items: [{id, authorsSummary: 'Studio'}]}];
   const state = {selected: {item: {series_id: 1, title: 'Title'}, episodes: last ? episodes.slice(0, 1) : episodes},
     episode: episodes[0], translation: 100};
-  const context = {state, Date, Number, JSON, String, Promise, esc: String,
+  const mainButton = {visible:false, disabled:false, text:'', handler:null, setText(value) {this.text = value;}, show() {this.visible = true;}, hide() {this.visible = false;}, enable() {this.disabled = false;}, disable() {this.disabled = true;}, onClick(fn) {this.handler = fn;}, offClick(fn) {if (this.handler === fn) this.handler = null;}};
+  const backButton = {visible:false, handler:null, show() {this.visible = true;}, hide() {this.visible = false;}, onClick(fn) {this.handler = fn;}, offClick(fn) {if (this.handler === fn) this.handler = null;}};
+  const context = {state, Date, Number, JSON, String, Promise, esc: String, telegram: telegramEnabled ? {MainButton:mainButton, BackButton:backButton, isFullscreen:false, onEvent(){}, offEvent(){}} : null, initData: telegramEnabled ? 'signed-init-data' : '',
+    document: {fullscreenElement:null, body:{classList:{contains:()=>false}}, addEventListener(){}, removeEventListener(){}},
+    setInterval: fn => { intervals.set(++intervalId, fn); return intervalId; }, clearInterval: id => intervals.delete(id),
+    releaseNavigationButtons() {}, playerExtrasMarkup: () => '', playerEpisodeList: () => '', bindPlayerExtras: () => () => {},
     root: {querySelector: key => key === 'video' ? video : nodes[key]},
     api: async (path, options) => {
       calls.push([path, options?.body && JSON.parse(options.body)]);
@@ -265,13 +280,15 @@ function episodePlayer({last = false, missingTranslation = false, missingQuality
   };
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf('  function matchingPlayerTranslation('), source.indexOf("  api('/api/me')")), context);
-  return {context, state, calls, events, nodes};
+  return {context, state, calls, events, nodes, intervals, mainButton, backButton, get playCount() {return playCount;}};
 }
 
 test('next episode completes before play, preserves translation and quality, ignores stale video events', async () => {
   const h = episodePlayer();
   await h.context.player(720);
   h.events.timeupdate();
+  assert.equal(h.nodes['#complete-episode'].hidden, false, 'DOM action appears within two minutes of the end');
+  assert.equal(h.nodes['#complete-episode'].textContent, 'Следующая серия');
   const oldTimeupdate = h.events.timeupdate;
   await h.nodes['#complete-episode'].onclick();
   const plays = h.calls.filter(([path]) => path === '/api/play');
@@ -287,11 +304,89 @@ test('next episode completes before play, preserves translation and quality, ign
   assert.equal(h.calls.find(([path]) => path === '/api/progress')[1].episode_id, 10);
 });
 
+test('Telegram BackButton and timed MainButton replace DOM actions and are released on cleanup', async () => {
+  const h = episodePlayer({telegramEnabled:true});
+  await h.context.player(720);
+  assert.equal(h.backButton.visible, true);
+  assert.equal(h.nodes['.player-back'].hidden, true);
+  h.events.timeupdate();
+  assert.equal(h.mainButton.visible, true);
+  assert.equal(h.mainButton.text, 'Следующая серия');
+  assert.equal(h.nodes['#complete-episode'].hidden, true);
+  h.context.state.player.cleanup();
+  assert.equal(h.mainButton.visible, false);
+  assert.equal(h.mainButton.handler, null);
+  assert.equal(h.backButton.visible, false);
+});
+
+test('MainButton hides again when seeking back outside the 1-2 minute action window', async () => {
+  const h = episodePlayer({telegramEnabled:true, duration:300});
+  await h.context.player(720);
+  h.events.timeupdate();
+  assert.equal(h.mainButton.visible, false);
+  h.context.root.querySelector('video').currentTime = 190;
+  h.events.timeupdate();
+  assert.equal(h.mainButton.visible, true);
+  h.context.root.querySelector('video').currentTime = 25;
+  h.events.timeupdate();
+  assert.equal(h.mainButton.visible, false);
+});
+
+test('proxy fallback keeps the current playback position', async () => {
+  const h = episodePlayer();
+  await h.context.player(720);
+  h.nodes['#fallback'].onclick();
+  await new Promise(resolve => setImmediate(resolve));
+  h.events.loadedmetadata();
+  assert.equal(h.context.root.querySelector('video').currentTime, 25);
+  assert.equal(h.calls.find(([path]) => path === '/api/progress')[1].position_seconds, 25);
+});
+
+test('ended episode offers a cancellable ten-second transition; cancel keeps the player', async () => {
+  const h = episodePlayer();
+  await h.context.player(720);
+  h.events.ended();
+  assert.equal(h.nodes['#player-countdown'].hidden, false);
+  assert.equal(h.nodes['#countdown-seconds'].textContent, '10');
+  h.nodes['#cancel-countdown'].onclick();
+  assert.equal(h.nodes['#player-countdown'].hidden, true);
+  assert.equal(h.intervals.size, 0);
+  assert.equal(h.calls.filter(([path]) => path.endsWith('/watched')).length, 0);
+});
+
+test('seeking back cancels the end countdown and its fullscreen overlay stays in the video surface', async () => {
+  const h = episodePlayer();
+  await h.context.player(720);
+  h.events.ended();
+  h.context.root.querySelector('video').currentTime = 50;
+  h.events.seeking();
+  assert.equal(h.nodes['#player-countdown'].hidden, true);
+  assert.equal(h.intervals.size, 0);
+  const surfaceStart = source.indexOf('<div class="player-surface"><video controls playsinline>');
+  const countdown = source.indexOf('<section class="player-countdown"', surfaceStart);
+  const surfaceEnd = source.indexOf('</div>${playerEpisodeList', surfaceStart);
+  assert.ok(surfaceStart >= 0 && countdown > surfaceStart && countdown < surfaceEnd);
+  assert.ok(!fs.readFileSync('ani365_bot/web_static/app.css', 'utf8').includes('.player-expanded .player-countdown'));
+});
+
+test('ended episode advances after countdown, after completing the current episode', async () => {
+  const h = episodePlayer();
+  await h.context.player(720);
+  h.events.ended();
+  const tick = [...h.intervals.values()][0];
+  for (let i = 0; i < 10; i++) tick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.calls.filter(([path]) => path === '/api/play').length, 2);
+  assert.equal(h.playCount, 1, 'automatically opened next episode starts playing');
+  const plays = h.calls.map(([path], index) => path === '/api/play' ? index : -1).filter(index => index >= 0);
+  assert.ok(h.calls.findIndex(([path]) => path.endsWith('/watched')) < plays[1]);
+});
+
 test('last episode is marked without opening another player', async () => {
   const h = episodePlayer({last: true});
   await h.context.player(720);
   await h.nodes['#complete-episode'].onclick();
-  assert.equal(h.nodes['#complete-episode'].textContent, '✓ Просмотрено');
+  assert.equal(h.nodes['#complete-episode'].textContent, '✓ Серия просмотрена');
   assert.equal(h.calls.filter(([path]) => path === '/api/play').length, 1);
 });
 

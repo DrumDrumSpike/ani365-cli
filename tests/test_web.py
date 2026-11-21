@@ -981,6 +981,25 @@ variants/720.m3u8?signature=private
         self.store.add_allowed_user(7, owner_id=42)
         self.assertEqual(self.client.get("/api/library", headers=self.headers(7)).json()["new_episodes"], [])
 
+    def test_watched_title_leaves_home_and_returns_after_new_release_without_alerts(self):
+        self.store.add_watchlist(42, 55, "Title")
+        self.anime.episodes.return_value = [{"id": 700, "episodeFull": "5 серия", "episodeInt": 5}]
+        headers = self.headers(42)
+        marked = self.client.post("/api/library/55/episodes/700/watched", headers=headers)
+        self.assertEqual(marked.status_code, 200)
+        payload = self.client.get("/api/library", headers=headers).json()
+        self.assertEqual(payload["items"], [])
+        self.assertEqual(payload["continue"], [])
+        self.assertEqual(len(payload["groups"]["watching"]), 1)
+        self.assertIn(55, self.store.series_to_observe())
+        self.store.observe_episodes(55, [{"id": 700, "episodeFull": "5 серия"},
+                                         {"id": 702, "episodeFull": "7 серия"}])
+        payload = self.client.get("/api/library", headers=headers).json()
+        self.assertEqual([item["series_id"] for item in payload["items"]], [55])
+        self.assertEqual(payload["new_episodes"][0]["last_available_episode_number"], "7 серия")
+        self.assertEqual(payload["continue"], [])
+        self.assertEqual(self.store.pending_notifications(), [])
+
     def test_completed_shikimori_titles_are_in_library_but_not_active_sections(self):
         self.store.add_watchlist(42, 55, "Finished")
         self.store.update_progress(42, 55, {"id": 700, "episodeFull": "7"})

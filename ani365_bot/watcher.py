@@ -7,7 +7,7 @@ outbox state; the injected sender turns a ready outbox row into a Telegram messa
 
 Store contract used here (all methods are synchronous SQLite operations):
 
-* ``unique_notification_series() -> iterable[int]``
+* ``series_to_observe() -> iterable[int]``
 * ``observe_episodes(series_id, episodes)`` records the shared episode snapshot
   and creates candidates only for subscriptions that are past their baseline.
 * ``notification_candidates(series_id, now=None) -> iterable[Mapping]`` returns
@@ -130,7 +130,7 @@ class Watcher:
     async def check_once(self):
         """Perform one shared observation pass, then independently drain the outbox."""
         now = self.clock()
-        series_ids = tuple(dict.fromkeys(self.store.unique_notification_series()))
+        series_ids = tuple(dict.fromkeys(self.store.series_to_observe()))
         if series_ids:
             semaphore = asyncio.Semaphore(self.concurrency)
 

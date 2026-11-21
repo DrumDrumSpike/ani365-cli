@@ -14,16 +14,17 @@ test('real libass renders vectors, layers and movement; follows seeks, size and 
     '-c:v','libvpx','-an',path.join(dir, 'video.webm')]);
   const source = fs.readFileSync('ani365_bot/web_static/app.js', 'utf8');
   const functions = source.slice(source.indexOf('  function loadPlayerSubtitles('), source.indexOf('  async function player(quality)'));
-  const fullscreen = source.slice(source.indexOf('  async function requestVideoFullscreen('), source.indexOf('  function watchPlayerFullscreen('));
+  const fullscreen = source.slice(source.indexOf('  async function requestVideoFullscreen('), source.indexOf('  function loadPlayerSubtitles('));
   const fixture = fs.readFileSync('tests/fixtures/rendering.ass');
   const server = http.createServer((req, res) => {
     if (req.url === '/') {
-      res.setHeader('Content-Type', 'text/html');
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.end(`<link rel="stylesheet" href="/assets/app.css"><style>body{margin:0}.player-surface{width:640px}</style>
-        <div class="player-page"><div class="player-surface"><video controls src="/video.webm"></video></div></div><p id="status"></p>
+        <div class="player-page"><div class="player-surface"><video controls src="/video.webm"></video><button class="player-exit">Выйти</button></div></div><p id="status"></p>
         <button id="full">Fullscreen</button><script src="/assets/subtitles-octopus.js"></script>
         <script>const initData=''; const telegram=null; ${functions} ${fullscreen}
         window.cleanup=loadPlayerSubtitles(document.querySelector('video'),'/subtitle',document.querySelector('#status'));
+        watchPlayerFullscreen(document.querySelector('video'),document.querySelector('#full'));
         document.querySelector('#full').onclick=()=>playerFullscreen(document.querySelector('video'),document.querySelector('#full'));</script>`);
     } else if (req.url === '/subtitle') { res.end(fixture); }
     else {
@@ -49,7 +50,7 @@ test('real libass renders vectors, layers and movement; follows seeks, size and 
     const errors=[];
     page.on('pageerror', error => errors.push(error.message));
     await page.goto(`http://127.0.0.1:${server.address().port}`);
-    await page.waitForFunction(() => document.querySelector('#status').textContent.includes('libass'));
+    await page.waitForFunction(() => document.querySelector('#status').textContent.includes('Русские субтитры'));
     await page.waitForFunction(() => document.querySelector('video').readyState >= 2);
     const seek = async time => {
       await page.evaluate(time => {document.querySelector('video').currentTime=time;}, time);

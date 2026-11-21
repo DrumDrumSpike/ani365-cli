@@ -20,7 +20,7 @@ class FakeStore:
         self.retried = []
         self.discarded = []
 
-    def unique_notification_series(self):
+    def series_to_observe(self):
         return self.series
 
     def observe_episodes(self, series_id, episodes, now=None):
