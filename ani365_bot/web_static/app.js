@@ -3,7 +3,7 @@
   const root = document.getElementById('app');
   const initData = telegram ? telegram.initData : '';
   if (telegram) { telegram.ready(); telegram.expand(); }
-  const state = { library: [], selected: null, episode: null, translation: null, quality: null, player: null, view: 'home', hls: null, hlsLoad: null, batchDownload: null };
+  const state = { library: [], selected: null, episode: null, translation: null, quality: null, player: null, view: 'home', hls: null, hlsLoad: null, batchDownload: null, resumePosition: 0, resumeEpisodeId: null };
   const esc = value => String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
   async function api(path, options = {}) {
     const headers = { ...(options.headers || {}) };
@@ -75,12 +75,30 @@
       const data = await api('/api/library'); state.library = data.items;
       const resume = data.continue?.[0];
       const resumeText = resume?.playback ? `${Math.floor(resume.playback.position_seconds / 60)}:${String(Math.floor(resume.playback.position_seconds % 60)).padStart(2, '0')}` : '';
-      root.innerHTML = `<div class="home-page">${resume ? `<section class="continue-hero"><img src="/assets/anime-night.webp" alt="" aria-hidden="true"><div class="hero-copy"><p class="eyebrow">Продолжить</p><p class="hero-meta">Серия ${esc(resume.last_watched_episode_number || '')}${resume.last_available_episode_number ? ` из ${esc(resume.last_available_episode_number)}` : ''}</p><h1>${esc(resume.title)}</h1>${resumeText ? `<p class="hero-description">Вы остановились на ${resumeText}. Плеер продолжит с того же места.</p>` : ''}<button class="action hero-action" data-series="${esc(resume.series_id)}">▶ Смотреть</button></div></section>` : `<section class="welcome-hero"><p class="eyebrow">Anime365</p><h1>Ваше аниме<br>в одном месте</h1><p>Найдите тайтл, добавьте его в библиотеку и продолжайте просмотр с того же места.</p><button class="action" id="search">Найти аниме</button></section>`}<section class="section-heading"><div><p class="eyebrow">Ваша очередь</p><h2>Смотрю сейчас</h2></div><button class="text-link" id="library">Все ›</button></section>${cards(data.items)}${data.new_episodes?.length ? `<section class="new-episodes"><span>✦</span><div><h2>Новые серии</h2><p>У ${esc(data.new_episodes.length)} ${data.new_episodes.length === 1 ? 'тайтла появилась новая серия.' : 'тайтлов появились новые серии.'}</p><button class="text-link" id="library-updates">Посмотреть обновления ›</button></div></section>` : ''}</div>`;
+      root.innerHTML = `<div class="home-page">${resume ? `<section class="continue-hero"><img src="/assets/anime-night.webp" alt="" aria-hidden="true"><div class="hero-copy"><p class="eyebrow">Продолжить просмотр</p><h1>${esc(resume.title)}</h1><button class="action hero-action" id="continue-watching">▶ Продолжить${resumeText ? ` с ${esc(resumeText)}` : ''}</button><button class="text-link hero-all" id="continue-all">Все серии</button></div></section>` : `<section class="welcome-hero"><p class="eyebrow">Anime365</p><h1>Ваше аниме<br>в одном месте</h1><p>Найдите тайтл, добавьте его в библиотеку и продолжайте просмотр с того же места.</p><button class="action" id="search">Найти аниме</button></section>`}<section class="section-heading"><div><p class="eyebrow">Ваша очередь</p><h2>Смотрю сейчас</h2></div><button class="text-link" id="library">Все ›</button></section>${cards(data.items)}${data.new_episodes?.length ? `<section class="new-episodes"><span>✦</span><div><h2>Новые серии</h2><div class="new-episode-list">${data.new_episodes.slice(0, 3).map(item => `<button class="new-episode-item" data-new-series="${esc(item.series_id)}" data-new-episode="${esc(item.last_available_episode_id || '')}"><strong>${esc(item.title)}</strong><span>Серия ${esc(item.last_available_episode_number || '?')} ›</span></button>`).join('')}</div><button class="text-link" id="library-updates">Посмотреть обновления в библиотеке ›</button></div></section>` : ''}</div>`;
       const searchButton = document.getElementById('search'); if (searchButton) searchButton.onclick = search;
-      const libraryButton = document.getElementById('library'); if (libraryButton) libraryButton.onclick = library;
-      const updatesButton = document.getElementById('library-updates'); if (updatesButton) updatesButton.onclick = library;
+      const libraryButton = document.getElementById('library'); if (libraryButton) libraryButton.onclick = () => library();
+      const updatesButton = document.getElementById('library-updates'); if (updatesButton) updatesButton.onclick = () => library(true);
+      root.querySelectorAll('[data-new-series]').forEach(button => button.onclick = () => openNewEpisode(Number(button.dataset.newSeries), Number(button.dataset.newEpisode)));
       root.querySelectorAll('[data-series]').forEach(button => button.onclick = () => details(Number(button.dataset.series)));
+      if (resume) {
+        const seriesId = Number(resume.series_id);
+        root.querySelector('#continue-all').onclick = () => details(seriesId, true);
+        root.querySelector('#continue-watching').onclick = async () => {
+          if (!await details(seriesId)) return;
+          const {playback, episodes} = state.selected;
+          const savedEpisode = episodes.find(item => Number(item.id) === Number(playback?.episode_id));
+          if (savedEpisode) return resumeDirect(savedEpisode.id);
+          const nextEpisode = episodes.find(item => !item.watched);
+          if (nextEpisode) await selectEpisode(nextEpisode.id);
+        };
+      }
     } catch (error) { fail(error); }
+  }
+  async function openNewEpisode(seriesId, episodeId) {
+    const loaded = await details(seriesId);
+    if (!loaded || Number(state.selected?.item?.series_id) !== Number(seriesId)) return;
+    if (episodeId && state.selected.episodes.some(item => Number(item.id) === Number(episodeId))) await selectEpisode(episodeId);
   }
   function cards(items, resume = false) {
     if (!items.length) return '<p class="empty">Пока здесь пусто.</p>';
@@ -92,21 +110,25 @@
     return `<section class="grid">${items.map(item => `<article class="card"><button data-catalog-series="${esc(item.series_id)}">${item.poster_url ? `<img class="poster" src="${esc(item.poster_url)}" alt="" loading="lazy">` : `<div class="poster catalog-placeholder">${label}</div>`}<strong>${esc(item.title)}</strong><div class="meta">${esc(item.year || 'Год не указан')}${item.series_type ? ` · ${esc(item.series_type)}` : ''}</div></button></article>`).join('')}</section>`;
   }
   const shikimoriStatus = status => ({planned:'Запланировано',watching:'Смотрю',rewatching:'Пересматриваю',completed:'Просмотрено',on_hold:'Отложено',dropped:'Брошено'}[status] || status);
-  async function library() {
+  function formatTitleCount(count) { const n = Number(count) || 0; const tail = n % 10 === 1 && n % 100 !== 11 ? 'тайтл' : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? 'тайтла' : 'тайтлов'; return `${n} ${tail}`; }
+  async function library(onlySeriesIds = null) {
     try {
       state.view = 'library';
       const data = await api('/api/library');
       const groups = [['watching', 'Смотрю'], ['rewatching', 'Пересматриваю'], ['planned', 'Запланировано'], ['on_hold', 'Отложено'], ['dropped', 'Брошено'], ['completed', 'Просмотрено']];
       const hentaiItems = data.hentai_items || [];
-      root.innerHTML = '<section class="page-heading"><p class="eyebrow">Личная коллекция</p><div><h1>Моё аниме</h1><span class="count-badge">' + esc(data.items?.length || 0) + ' тайтлов</span></div></section><label class="search-field"><span>⌕</span><input id="library-search" placeholder="Поиск по названию"></label><div id="library-groups"></div><button class="action secondary back">Назад</button>';
+      const isUpdates = onlySeriesIds === true;
+      const updateSeriesIds = isUpdates ? [...new Set((data.new_episodes || []).map(item => Number(item.series_id)))] : null;
+      root.innerHTML = '<section class="page-heading"><p class="eyebrow">Личная коллекция</p><div><h1>' + (isUpdates ? 'Обновления' : 'Моё аниме') + '</h1><span class="count-badge">' + esc(formatTitleCount(isUpdates ? updateSeriesIds.length : data.items?.length || 0)) + '</span></div></section><label class="search-field"><span>⌕</span><input id="library-search" placeholder="Поиск по названию"></label><div id="library-groups"></div><button class="action secondary back">Назад</button>';
       useBack(); root.querySelector('.back').onclick = home;
       const search = root.querySelector('#library-search');
       const render = () => {
         const query = search.value.trim().toLocaleLowerCase();
+        const allowed = updateSeriesIds ? new Set(updateSeriesIds) : null;
         const sections = groups.map(([status, label]) => {
-          const items = (data.groups?.[status] || []).filter(item => !query || String(item.title || '').toLocaleLowerCase().includes(query));
+          const items = (data.groups?.[status] || []).filter(item => (!allowed || allowed.has(Number(item.series_id))) && (!query || String(item.title || '').toLocaleLowerCase().includes(query)));
           return items.length ? `<details class="library-group" open><summary>${label} · ${items.length}</summary>${cards(items)}</details>` : '';
-        }).join('') + (() => { const items = hentaiItems.filter(item => !query || String(item.title || '').toLocaleLowerCase().includes(query)); return items.length ? `<details class="library-group"><summary>Hentai365 · ${items.length}</summary>${cards(items)}</details>` : ''; })();
+        }).join('') + (() => { const items = hentaiItems.filter(item => (!allowed || allowed.has(Number(item.series_id))) && (!query || String(item.title || '').toLocaleLowerCase().includes(query))); return items.length ? `<details class="library-group"><summary>Hentai365 · ${items.length}</summary>${cards(items)}</details>` : ''; })();
         root.querySelector('#library-groups').innerHTML = sections || '<p class="empty">Ничего не найдено.</p>';
         root.querySelectorAll('[data-series]').forEach(button => button.onclick = () => details(Number(button.dataset.series)));
       };
@@ -297,7 +319,7 @@
       bindEpisodePicker(data);
     };
   }
-  async function details(seriesId) {
+  async function details(seriesId, showAllEpisodes = false) {
     try {
       state.view = 'details';
       const data = await api(`/api/library/${seriesId}`); state.selected = data;
@@ -306,14 +328,15 @@
       const resumeEpisode = data.episodes.find(item => Number(item.id) === Number(p?.episode_id));
       state.episodeFocusId = resumeEpisode?.id || nextEpisode?.id || null;
       state.episodeRadius = 2;
-      state.episodesFullyOpen = false;
+      state.episodesFullyOpen = showAllEpisodes;
       const currentMode = data.item.notifications_enabled ? data.item.notification_mode : '';
       const isHentai = data.item.provider === 'hentai365';
       const shikimori = isHentai ? '' : data.item.shikimori_status
         ? `<section class="panel"><h2>Shikimori</h2><select id="shiki-status">${[['planned','Запланировано'],['watching','Смотрю'],['rewatching','Пересматриваю'],['completed','Просмотрено'],['on_hold','Отложено'],['dropped','Брошено']].map(([value,label]) => `<option value="${value}" ${data.item.shikimori_status === value ? 'selected' : ''}>${label}</option>`).join('')}</select><button class="action secondary" id="save-shiki-status">Сохранить статус</button><button class="action secondary" id="refresh-shikimori">Обновить обложку</button><button class="action secondary" id="choose-shikimori">Перепривязать Shikimori</button></section>`
         : `<section class="panel"><h2>Shikimori</h2><p class="meta">Привяжите тайтл из уже импортированного списка, чтобы добавить статус и обложку.</p><button class="action secondary" id="choose-shikimori">Привязать Shikimori</button></section>`;
       const notifications = isHentai ? '' : `<section class="panel"><h2>Уведомления</h2><select id="notification-mode"><option value="">Отключены</option><option value="any" ${currentMode === 'any' ? 'selected' : ''}>Любая новая серия</option><option value="subtitles" ${currentMode === 'subtitles' ? 'selected' : ''}>Русские субтитры</option><option value="voice" ${currentMode === 'voice' ? 'selected' : ''}>Русская озвучка</option></select><button class="action secondary" id="save-notifications">Сохранить уведомления</button></section>`;
-      root.innerHTML = `<section class="title-header"><div><h1>${esc(data.item.title)}</h1><p class="meta">Просмотрено: ${esc(data.item.last_watched_episode_number || 0)} / ${data.episodes.length}${data.item.shikimori_status ? ` · Shikimori: ${esc(shikimoriStatus(data.item.shikimori_status))}` : ''}</p>${p ? `<button class="action" id="resume">Продолжить с ${Math.floor(p.position_seconds/60)}:${String(Math.floor(p.position_seconds%60)).padStart(2,'0')}</button>` : ''}</div>${data.item.poster_url ? `<img class="detail-poster" src="${esc(data.item.poster_url)}" alt="" loading="lazy">` : ''}</section>${notifications}${shikimori}<h2>Серии</h2>${episodePicker(data)}${isHentai ? '' : '<button class="action secondary" id="batch-download">Скачать серии</button>'}<button class="action secondary" id="remove-series">Удалить из «Смотрю»</button><button class="action secondary back">Назад</button>`;
+      const resumeAvailable = p && resumeEpisode;
+      root.innerHTML = `<section class="title-header"><div><h1>${esc(data.item.title)}</h1><p class="meta">Просмотрено: ${esc(data.item.last_watched_episode_number || 0)} / ${data.episodes.length}${data.item.shikimori_status ? ` · Shikimori: ${esc(shikimoriStatus(data.item.shikimori_status))}` : ''}</p>${resumeAvailable ? `<button class="action" id="resume">Продолжить серию ${esc(resumeEpisode.number)} с ${Math.floor(p.position_seconds/60)}:${String(Math.floor(p.position_seconds%60)).padStart(2,'0')}</button>` : p ? '<p class="meta">Сохранённая серия больше недоступна. Выберите доступную серию ниже.</p>' : ''}</div>${data.item.poster_url ? `<img class="detail-poster" src="${esc(data.item.poster_url)}" alt="" loading="lazy">` : ''}</section>${notifications}${shikimori}<h2>Серии</h2>${episodePicker(data)}${isHentai ? '' : '<button class="action secondary" id="batch-download">Скачать серии</button>'}<button class="action secondary" id="remove-series">Удалить из «Смотрю»</button><button class="action secondary back">Назад</button>`;
       useBack(); root.querySelector('.back').onclick = back;
       const saveNotifications = root.querySelector('#save-notifications'); if (saveNotifications) saveNotifications.onclick = async () => { try {
         const mode = root.querySelector('#notification-mode').value;
@@ -324,10 +347,11 @@
       const chooseShikimori = root.querySelector('#choose-shikimori'); if (chooseShikimori) chooseShikimori.onclick = () => shikimoriLibraryLinks(seriesId, data.item.title);
       const refresh = root.querySelector('#refresh-shikimori');
       if (refresh) refresh.onclick = async () => { try { refresh.disabled = true; refresh.textContent = 'Обновляем…'; await api(`/api/library/${seriesId}/shikimori-metadata`, {method:'POST'}); details(seriesId); } catch(error) { fail(error); } };
-      if (p) root.querySelector('#resume').onclick = () => selectEpisode(p.episode_id);
+      if (resumeAvailable) root.querySelector('#resume').onclick = () => resumeDirect(p.episode_id);
       const batchDownload = root.querySelector('#batch-download'); if (batchDownload) batchDownload.onclick = startBatchDownload;
       bindEpisodePicker(data);
-    } catch(error) { fail(error); }
+      return true;
+    } catch(error) { fail(error); return false; }
   }
 
   async function shikimoriLibraryLinks(seriesId, initialQuery) {
@@ -344,6 +368,31 @@
       } catch(error) { fail(error); }
     };
     await render(initialQuery);
+  }
+  async function resumeDirect(episodeId) {
+    try {
+      const playback = state.selected?.playback;
+      state.episode = state.selected.episodes.find(item => Number(item.id) === Number(episodeId));
+      state.resumePosition = Number(playback?.position_seconds) || 0;
+      state.resumeEpisodeId = Number(episodeId);
+      if (!playback?.translation_id || !playback?.quality) {
+        await selectEpisode(episodeId);
+        return;
+      }
+      const data = await api(`/api/episodes/${episodeId}/translations?series_id=${encodeURIComponent(state.selected.item.series_id)}`);
+      const translation = data.groups?.flatMap(group => group.items || []).find(item => Number(item.id) === Number(playback.translation_id));
+      if (!translation) { await selectEpisode(episodeId); return; }
+      const qualities = await api(`/api/translations/${translation.id}/qualities?series_id=${encodeURIComponent(state.selected.item.series_id)}`);
+      if (!qualities.items?.some(value => Number(value) === Number(playback.quality))) {
+        await selectEpisode(episodeId);
+        return;
+      }
+      state.translation = Number(translation.id);
+      await player(Number(playback.quality));
+    } catch (_) {
+      // If metadata or the saved choice is stale, let the user choose a current source.
+      await selectEpisode(episodeId);
+    }
   }
   async function selectEpisode(episodeId) { try { state.episode = state.selected.episodes.find(item => item.id === episodeId); const data = await api(`/api/episodes/${episodeId}/translations?series_id=${encodeURIComponent(state.selected.item.series_id)}`); root.innerHTML = `<h1>Серия ${esc(state.episode.number)}</h1>${state.episode.watched ? '<p class="meta">Серия отмечена просмотренной.</p>' : '<section class="panel"><button class="action secondary" id="mark-watched">Отметить просмотренной</button><p class="meta">Серия и предыдущие будут отмечены просмотренными.</p></section>'}${data.groups.map(group => `<section class="panel"><h2>${esc(group.label)}</h2>${group.items.map(item => `<button class="action secondary" data-translation="${item.id}">${esc(item.authorsSummary || item.title || 'Перевод')}</button>`).join('')}</section>`).join('')}<button class="action secondary back">Назад</button>`; useBack(); root.querySelector('.back').onclick = () => details(state.selected.item.series_id); const markWatched = root.querySelector('#mark-watched'); if (markWatched) markWatched.onclick = async () => { try { markWatched.disabled = true; markWatched.textContent = 'Отмечаем…'; await api(`/api/library/${state.selected.item.series_id}/episodes/${state.episode.id}/watched`, {method:'POST'}); details(state.selected.item.series_id); } catch(error) { fail(error); } }; root.querySelectorAll('[data-translation]').forEach(button => button.onclick = () => qualities(Number(button.dataset.translation))); } catch(error) { fail(error); } }
   async function qualities(translationId) { try { state.translation = translationId; const data = await api(`/api/translations/${translationId}/qualities?series_id=${encodeURIComponent(state.selected.item.series_id)}`); root.innerHTML = `<h1>Качество</h1>${data.items.map(value => `<section class="panel"><strong>${value}p</strong><div><button class="action" data-watch="${value}">Смотреть</button><button class="action secondary" data-download="${value}">Скачать</button></div></section>`).join('')}<button class="action secondary back">Назад</button>`; root.querySelector('.back').onclick = () => selectEpisode(state.episode.id); root.querySelectorAll('[data-watch]').forEach(button => button.onclick = () => player(Number(button.dataset.watch))); root.querySelectorAll('[data-download]').forEach(button => button.onclick = () => downloadOptions(Number(button.dataset.download))); } catch(error) { fail(error); } }
@@ -680,7 +729,7 @@
     return candidates.find(item => author(item) === author(selected)) || null;
   }
 
-  async function player(quality) { try { state.view = 'player'; const seriesId = state.selected.item.series_id; const episode = state.episode; const translationId = state.translation; const episodes = state.selected.episodes; const nextEpisode = episodes[episodes.findIndex(item => item.id === episode.id) + 1]; let active = true; let disposed = false; let pending = Promise.resolve(); const result = await api('/api/play', {method:'POST', body:JSON.stringify({series_id:seriesId, episode_id:episode.id, translation_id:translationId, quality})}); root.innerHTML = `<section class="player-page"><h1 class="player-heading">${esc(state.selected.item.title)} <span>· Серия ${esc(state.episode.number)}</span></h1><div class="player-surface"><video controls playsinline></video><button class="player-exit" type="button">Выйти из полного экрана</button></div>${result.subtitle_url ? '<p class="meta player-subtitle-status" id="subtitle-status">Загружаем субтитры…</p>' : ''}<p class="player-actions"><button class="action" id="complete-episode">${nextEpisode ? 'Просмотрено → Следующая серия' : 'Отметить просмотренной'}</button><button class="action secondary" id="fullscreen">На весь экран</button><button class="action secondary" id="fallback">Использовать proxy-поток</button></p><p class="meta" id="player-progress-status" role="status"></p><button class="action secondary back player-back">Назад</button></section>`; const video = root.querySelector('video'); const fullscreenButton = root.querySelector('#fullscreen'); const stopWatchingFullscreen = watchPlayerFullscreen(video, fullscreenButton); const stopSubtitles = result.subtitle_url ? loadPlayerSubtitles(video, result.subtitle_url, root.querySelector('#subtitle-status'), result.subtitle_fonts) : () => {}; state.player = {video, cleanup: () => { disposed = true; active = false; stopWatchingFullscreen(); stopSubtitles(); video.pause(); destroyHls(); }}; const hls = isHlsSource(result.media_url); let usingProxy = false; const fallback = async () => { if (!active || usingProxy) return; usingProxy = true; const button = root.querySelector('#fallback'); button.disabled = true; button.textContent = 'Подключаем proxy…'; await setVideoSource(video, result.proxy_url, hls); video.play().catch(()=>{}); button.textContent = 'Proxy-поток подключён'; }; const start = () => setVideoSource(video, result.media_url, hls, () => fallback().catch(()=>{})); await start(); video.addEventListener('error', () => { if (!usingProxy) fallback().catch(()=>{}); }); let last = 0;
+  async function player(quality) { try { state.view = 'player'; const seriesId = state.selected.item.series_id; const episode = state.episode; const translationId = state.translation; const episodes = state.selected.episodes; const nextEpisode = episodes[episodes.findIndex(item => item.id === episode.id) + 1]; let active = true; let disposed = false; let pending = Promise.resolve(); const result = await api('/api/play', {method:'POST', body:JSON.stringify({series_id:seriesId, episode_id:episode.id, translation_id:translationId, quality})}); root.innerHTML = `<section class="player-page"><h1 class="player-heading">${esc(state.selected.item.title)} <span>· Серия ${esc(state.episode.number)}</span></h1><div class="player-surface"><video controls playsinline></video><button class="player-exit" type="button">Выйти из полного экрана</button></div>${result.subtitle_url ? '<p class="meta player-subtitle-status" id="subtitle-status">Загружаем субтитры…</p>' : ''}<p class="player-actions"><button class="action" id="complete-episode">${nextEpisode ? 'Просмотрено → Следующая серия' : 'Отметить просмотренной'}</button><button class="action secondary" id="fullscreen">На весь экран</button><button class="action secondary" id="fallback">Использовать proxy-поток</button></p><p class="meta" id="player-progress-status" role="status"></p><button class="action secondary back player-back">Назад</button></section>`; const video = root.querySelector('video'); const fullscreenButton = root.querySelector('#fullscreen'); const stopWatchingFullscreen = watchPlayerFullscreen(video, fullscreenButton); const stopSubtitles = result.subtitle_url ? loadPlayerSubtitles(video, result.subtitle_url, root.querySelector('#subtitle-status'), result.subtitle_fonts) : () => {}; state.player = {video, cleanup: () => { disposed = true; active = false; stopWatchingFullscreen(); stopSubtitles(); video.pause(); destroyHls(); }}; const hls = isHlsSource(result.media_url); let usingProxy = false; const fallback = async () => { if (!active || usingProxy) return; usingProxy = true; const button = root.querySelector('#fallback'); button.disabled = true; button.textContent = 'Подключаем proxy…'; await setVideoSource(video, result.proxy_url, hls); video.play().catch(()=>{}); button.textContent = 'Proxy-поток подключён'; }; const shouldResume = Number(state.resumeEpisodeId) === Number(episode.id); const resumeAt = shouldResume ? Number(state.resumePosition) || 0 : 0; if (shouldResume) video.addEventListener('loadedmetadata', () => { if (resumeAt > 0 && Number.isFinite(video.duration)) video.currentTime = Math.min(resumeAt, Math.max(0, video.duration - 1)); video.play().catch(() => {}); state.resumeEpisodeId = null; state.resumePosition = 0; }, {once:true}); const start = () => setVideoSource(video, result.media_url, hls, () => fallback().catch(()=>{})); await start(); video.addEventListener('error', () => { if (!usingProxy) fallback().catch(()=>{}); }); let last = 0;
       const save = (ended=false) => {
         if (!active || (!ended && (!Number.isFinite(video.duration) || !video.duration || Date.now()-last < 15000))) return pending;
         last = Date.now();

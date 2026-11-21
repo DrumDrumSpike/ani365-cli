@@ -81,3 +81,9 @@ video { display: block; width: 100%; max-height: 75vh; border-radius: 18px; back
   .player-expanded .controls-idle { cursor: none; }
   .player-expanded .controls-idle .player-exit { opacity: 0; pointer-events: none; }
 }
+.new-episode-list { display: grid; gap: 7px; margin: 12px 0; }
+.new-episode-item { display: flex; justify-content: space-between; align-items: center; gap: 12px; width: 100%; padding: 11px 12px; border: 1px solid var(--line); border-radius: 12px; background: #1b1c25; color: var(--text); text-align: left; cursor: pointer; }
+.new-episode-item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.new-episode-item span { flex: 0 0 auto; color: var(--muted); font-size: 13px; }
+.new-episodes > div { flex: 1; min-width: 0; }
+.hero-all { align-self: flex-start; min-height: 44px; color: var(--text); }

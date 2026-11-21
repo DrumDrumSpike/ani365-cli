@@ -7,7 +7,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 
 class StateError(ValueError):
@@ -136,6 +136,17 @@ class Store:
             with self.db:
                 self.db.execute("CREATE TABLE IF NOT EXISTS seasonal_catalog (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL)")
                 self.db.execute("PRAGMA user_version = 13")
+            version = 13
+        if version < 14:
+            with self.db:
+                # Bot and Mini App can start against the same existing database.
+                self.db.execute("BEGIN IMMEDIATE")
+                columns = {row[1] for row in self.db.execute("PRAGMA table_info(playback_progress)")}
+                if "translation_id" not in columns:
+                    self.db.execute("ALTER TABLE playback_progress ADD COLUMN translation_id INTEGER")
+                if "quality" not in columns:
+                    self.db.execute("ALTER TABLE playback_progress ADD COLUMN quality INTEGER")
+                self.db.execute("PRAGMA user_version = 14")
 
     def seasonal_snapshot(self):
         row = self.db.execute("SELECT payload FROM seasonal_catalog WHERE id=1").fetchone()
@@ -1307,12 +1318,39 @@ class Store:
         user_id = self._positive_id(user_id, "user_id")
         series_id = self._positive_id(series_id, "series_id")
         row = self.db.execute("""
-            SELECT episode_id, position_seconds, duration_seconds, updated_at
+            SELECT episode_id, position_seconds, duration_seconds, updated_at, translation_id, quality
             FROM playback_progress WHERE user_id=? AND series_id=?
         """, (user_id, series_id)).fetchone()
         if row is None:
             return None
-        return dict(zip(("episode_id", "position_seconds", "duration_seconds", "updated_at"), row))
+        return dict(zip(("episode_id", "position_seconds", "duration_seconds", "updated_at",
+                         "translation_id", "quality"), row))
+
+    def set_playback_choice(self, user_id, series_id, episode_id, translation_id, quality, now=None):
+        """Persist the selected source for this user's current resumable episode."""
+        user_id = self._positive_id(user_id, "user_id")
+        series_id = self._positive_id(series_id, "series_id")
+        episode_id = self._positive_id(episode_id, "episode_id")
+        translation_id = self._positive_id(translation_id, "translation_id")
+        quality = self._positive_id(quality, "quality")
+        timestamp = self._now(now)
+        with self.db:
+            if not self.has_watchlist(user_id, series_id):
+                return None
+            self.db.execute("""
+                INSERT INTO playback_progress(
+                    user_id, series_id, episode_id, position_seconds, duration_seconds,
+                    updated_at, translation_id, quality
+                ) VALUES (?, ?, ?, 0, 0, ?, ?, ?)
+                ON CONFLICT(user_id, series_id) DO UPDATE SET
+                    position_seconds=CASE WHEN playback_progress.episode_id=excluded.episode_id
+                        THEN playback_progress.position_seconds ELSE 0 END,
+                    duration_seconds=CASE WHEN playback_progress.episode_id=excluded.episode_id
+                        THEN playback_progress.duration_seconds ELSE 0 END,
+                    episode_id=excluded.episode_id, updated_at=excluded.updated_at,
+                    translation_id=excluded.translation_id, quality=excluded.quality
+            """, (user_id, series_id, episode_id, timestamp, translation_id, quality))
+        return self.playback_progress(user_id, series_id)
 
     def record_playback_progress(self, user_id, series_id, episode, position_seconds,
                                  duration_seconds, episode_number=None, *, ended=False,
@@ -1341,13 +1379,18 @@ class Store:
                 return None
             self.db.execute("""
                 INSERT INTO playback_progress(
-                    user_id, series_id, episode_id, position_seconds, duration_seconds, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    user_id, series_id, episode_id, position_seconds, duration_seconds,
+                    updated_at, translation_id, quality
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)
                 ON CONFLICT(user_id, series_id) DO UPDATE SET
                     episode_id=excluded.episode_id,
                     position_seconds=excluded.position_seconds,
                     duration_seconds=excluded.duration_seconds,
-                    updated_at=excluded.updated_at
+                    updated_at=excluded.updated_at,
+                    translation_id=CASE WHEN playback_progress.episode_id=excluded.episode_id
+                        THEN playback_progress.translation_id ELSE NULL END,
+                    quality=CASE WHEN playback_progress.episode_id=excluded.episode_id
+                        THEN playback_progress.quality ELSE NULL END
             """, (user_id, series_id, episode_id, position, duration, timestamp))
             if completed:
                 self.db.execute("""
@@ -1366,7 +1409,7 @@ class Store:
         columns = ", ".join(f"w.{column}" for column in self._WATCHLIST_COLUMNS)
         rows = self.db.execute(f"""
             SELECT {columns}, p.episode_id, p.position_seconds, p.duration_seconds,
-                   p.updated_at
+                   p.updated_at, p.translation_id, p.quality
             FROM playback_progress AS p
             JOIN watchlist AS w ON w.user_id=p.user_id AND w.series_id=p.series_id
             WHERE p.user_id=? ORDER BY p.updated_at DESC LIMIT ?
@@ -1375,7 +1418,8 @@ class Store:
         for row in rows:
             item = self._watchlist_dict(row[:len(self._WATCHLIST_COLUMNS)])
             item["playback"] = dict(zip(
-                ("episode_id", "position_seconds", "duration_seconds", "updated_at"),
+                ("episode_id", "position_seconds", "duration_seconds", "updated_at",
+                 "translation_id", "quality"),
                 row[len(self._WATCHLIST_COLUMNS):]))
             result.append(item)
         return result

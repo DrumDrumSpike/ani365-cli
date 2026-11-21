@@ -1709,6 +1709,8 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
             subtitle_url = f"/api/subtitles/{subtitle_ticket}"
         # Direct playback is first choice. The private ticket is only used after
         # a WebView/CDN incompatibility, never for normal video traffic.
+        store.set_playback_choice(user_id, payload.series_id, payload.episode_id,
+                                  payload.translation_id, payload.quality)
         return {"media_url": source.urls[0], "subtitle_url": subtitle_url,
                 "subtitle_fonts": {family: [f"/assets/subtitle-fonts/{name}" for name in files]
                                    for family, files in subtitle_fonts(config.data_dir).items()} if subtitle_url else {},

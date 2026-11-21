@@ -171,6 +171,21 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.get_watchlist(2, 10)["last_watched_episode_id"], None)
         self.assertEqual(self.store.recent_playback(1)[0]["playback"]["episode_id"], 101)
 
+    def test_playback_choice_is_private_and_survives_progress_updates(self):
+        self.store.add_watchlist(1, 10, "One")
+        self.store.add_watchlist(2, 10, "Two")
+        choice = self.store.set_playback_choice(1, 10, 101, 501, 720, now=4)
+        self.assertEqual((choice["episode_id"], choice["translation_id"], choice["quality"]),
+                         (101, 501, 720))
+        self.assertEqual(self.store.playback_progress(2, 10), None)
+        progress = self.store.record_playback_progress(1, 10, episode(101, 1), 25, 100, now=5)
+        self.assertEqual((progress["position_seconds"], progress["translation_id"], progress["quality"]),
+                         (25, 501, 720))
+        replacement = self.store.set_playback_choice(1, 10, 102, 502, 1080, now=6)
+        self.assertEqual((replacement["episode_id"], replacement["position_seconds"],
+                          replacement["translation_id"], replacement["quality"]),
+                         (102, 0, 502, 1080))
+
     def test_external_account_and_oauth_state_are_private_and_one_time(self):
         self.store.save_external_account(1, "shikimori", "access-secret", "refresh-secret", 100, "42")
         self.assertEqual(self.store.external_account_status(1, "shikimori"), {

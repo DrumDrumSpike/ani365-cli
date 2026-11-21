@@ -295,6 +295,45 @@ test('last episode is marked without opening another player', async () => {
   assert.equal(h.calls.filter(([path]) => path === '/api/play').length, 1);
 });
 
+function resumeHarness({translationAvailable = true, qualityAvailable = true, choice = {translation_id: 501, quality: 1080}} = {}) {
+  const calls = [];
+  const episode = {id: 10, number: '3'};
+  const state = {selected: {item: {series_id: 7}, episodes: [episode], playback: {
+    episode_id: 10, position_seconds: 47, ...choice,
+  }}, episode: null, resumePosition: 47, resumeEpisodeId: 10};
+  const context = {
+    state, Number, encodeURIComponent, Promise,
+    api: async path => {
+      calls.push(path);
+      if (path.includes('/translations?')) return {groups: [{items: translationAvailable ? [{id: 501}] : [{id: 999}]}]};
+      if (path.includes('/qualities')) return {items: qualityAvailable ? [1080, 720] : [720]};
+      throw Error('unexpected API request');
+    },
+    player: async quality => calls.push(['player', state.translation, quality]),
+    selectEpisode: async id => calls.push(['select', id, state.resumePosition, state.resumeEpisodeId]),
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('  async function resumeDirect('),
+    source.indexOf('  async function selectEpisode(')), context);
+  return {context, calls, state};
+}
+
+test('resume opens the saved episode, translation and quality directly', async () => {
+  const h = resumeHarness();
+  await h.context.resumeDirect(10);
+  assert.ok(h.calls.some(call => Array.isArray(call) && call[0] === 'player' && call[1] === 501 && call[2] === 1080));
+  assert.equal(h.state.resumePosition, 47);
+  assert.equal(h.state.resumeEpisodeId, 10);
+});
+
+test('resume falls back to source selection without losing the saved position', async () => {
+  const h = resumeHarness({translationAvailable: false});
+  await h.context.resumeDirect(10);
+  assert.ok(h.calls.some(call => Array.isArray(call) && call[0] === 'select' && call[1] === 10 && call[2] === 47));
+  assert.equal(h.state.resumePosition, 47);
+  assert.equal(h.state.resumeEpisodeId, 10);
+});
+
 for (const [option, destination, id] of [['missingTranslation', 'select', 20], ['missingQuality', 'qualities', 200]]) {
   test(`${option} opens selection`, async () => {
     const h = episodePlayer({[option]: true});

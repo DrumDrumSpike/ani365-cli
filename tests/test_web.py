@@ -236,6 +236,9 @@ class WebTests(unittest.TestCase):
         self.assertEqual(result.status_code, 200)
         self.assertNotIn("anime365-secret-token", result.text)
         self.assertIn("media_url", result.json())
+        saved_choice = self.store.playback_progress(42, 55)
+        self.assertEqual((saved_choice["episode_id"], saved_choice["translation_id"],
+                          saved_choice["quality"]), (700, 800, 1080))
         progress = self.client.post("/api/progress", headers=self.headers(42), json={
             "series_id": 55, "episode_id": 700, "position_seconds": 89, "duration_seconds": 100,
         })
