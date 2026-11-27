@@ -6,6 +6,7 @@ from one.  Anime365 credentials and signed media URLs remain backend-only except
 for the selected direct-playback URL returned to its authenticated owner.
 """
 import asyncio
+from datetime import datetime
 import hashlib
 import hmac
 import ipaddress
@@ -427,6 +428,23 @@ def _shikimori_public_metadata(anime):
             "shikimori_aired_on": str(anime.get("aired_on") or "")[:32] or None}
 
 
+def _shikimori_timestamp(value):
+    """Shikimori rate updated_at is an ISO timestamp. Unknown values stay empty."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
 def _shikimori_rates(rows, statuses, anime_by_id=None, metadata_by_id=None):
     """Keep only safe, normalized Anime rates from an untrusted API payload."""
     result, seen = [], set()
@@ -458,6 +476,7 @@ def _shikimori_rates(rows, statuses, anime_by_id=None, metadata_by_id=None):
         result.append({"external_rate_id": rate_id, "external_anime_id": anime_id,
                        "status": str(row["status"]), "episodes": episodes,
                        "score": score if 1 <= score <= 10 else None,
+                       "updated_at": _shikimori_timestamp(row.get("updated_at")),
                        "title": title_value,
                        "poster_url": public.get("poster_url") or cached.get("poster_url"),
                        "shikimori_kind": public.get("shikimori_kind") or cached.get("kind"),

@@ -10,17 +10,18 @@ from .candidates import select_candidates, user_franchises
 from .catalog import CatalogError
 from .continuations import find_continuations
 from .llm import LLMError, user_message
-from .mood import apply_mood, mood_searches, normalize_mood
+from .mood import apply_mood, genre_ids_for, mood_searches, normalize_mood
 from .parser import ParseError, parse_picks
 from .prompt import SYSTEM_PROMPT, build_user_prompt
 from .resolve import resolve_candidates
-from .taste import taste_profile, top_genres
+from .taste import seed_title_ids, source_genre_ids, taste_profile
 
 
 LOG = logging.getLogger(__name__)
 SOURCES = ("openai", "xai")
 SOURCE_LABELS = {"openai": "ChatGPT", "xai": "Grok"}
-TASTE_METADATA_LIMIT = 250
+TASTE_METADATA_LIMIT = 1500
+METADATA_TTL_SECONDS = 14 * 24 * 60 * 60
 CONTINUATION_SOURCE_LIMIT = 80
 RESOLVE_POOL_LIMIT = 80
 CONTINUATION_STALE_SECONDS = 12 * 60 * 60
@@ -115,6 +116,9 @@ class RecommendationService:
                 profile, self.store.recent_recommendation_feedback(user_id, limit=5),
                 sorted((value for value in self.store.recommended_shikimori_ids(user_id)
                         if str(value).isdigit()), key=int), candidates, mood)
+            approx_tokens = max(1, (len(SYSTEM_PROMPT) + len(prompt)) // 4)
+            LOG.debug("Recommendation prompt size user=%s source=%s chars=%s approx_tokens=%s candidates=%s",
+                      user_id, source, len(prompt), approx_tokens, len(candidates))
             raw = await self._complete(job_id, client, prompt)
             try:
                 picks = parse_picks(raw, [item["id"] for item in candidates])
@@ -163,10 +167,22 @@ class RecommendationService:
         except Exception:
             LOG.info("Recommendation rate refresh skipped (user=%s)", user_id)
 
+    async def _cached_metadata(self, identifiers, *, related):
+        identifiers = [str(value) for value in identifiers if str(value).strip()]
+        cached = self.store.cached_shikimori_anime(
+            identifiers, now=self._now(), max_age=METADATA_TTL_SECONDS, require_related=related)
+        missing = [value for value in identifiers if value not in cached]
+        fresh = {}
+        if missing:
+            fresh = await self.catalog.metadata(missing, related=related)
+            if fresh:
+                self.store.save_shikimori_anime(fresh.values(), now=self._now())
+        return {**cached, **fresh}
+
     async def _profile(self, rates):
         identifiers = [rate["external_anime_id"] for rate in rates if rate["status"] in
                        {"completed", "watching", "rewatching", "on_hold", "dropped", "planned"}]
-        metadata = await self.catalog.metadata(identifiers[:TASTE_METADATA_LIMIT], related=False) if identifiers else {}
+        metadata = await self._cached_metadata(identifiers[:TASTE_METADATA_LIMIT], related=False) if identifiers else {}
         return taste_profile(rates, metadata), metadata
 
     def _job_mood(self, job):
@@ -182,9 +198,15 @@ class RecommendationService:
 
     async def _candidates(self, user_id, rates, metadata, profile, mood=None):
         mood = mood if isinstance(mood, dict) else normalize_mood(None)
-        genres = top_genres(profile["genre_weights"], limit=4)
-        searches = mood_searches(mood)
-        if not genres and not searches:
+        match_ids = genre_ids_for(mood)
+        if match_ids:
+            genres = list(match_ids)
+            seeds = seed_title_ids(profile, match_ids)
+        else:
+            genres = source_genre_ids(profile.get("genre_weights") or {}, limit=4)
+            seeds = seed_title_ids(profile)
+        searches = mood_searches(mood) if not mood.get("open") else []
+        if not genres and not searches and not seeds:
             return []
         excluded = {str(rate.get("external_anime_id") or "").strip() for rate in rates
                     if isinstance(rate, dict)}
@@ -192,7 +214,15 @@ class RecommendationService:
         franchises = user_franchises(rates, metadata)
         recommended = self.store.recommended_shikimori_ids(user_id)
         library = set((self.store.recommendation_profile(user_id) or {}).get("excluded_anime365_series_ids") or ())
-        raw = apply_mood(await self.catalog.candidates(genres, searches=searches), mood)
+        raw = []
+        if genres or searches:
+            raw = await self.catalog.candidates(genres, searches=searches)
+        if seeds and hasattr(self.catalog, "similar"):
+            try:
+                raw = list(raw) + list(await self.catalog.similar(seeds))
+            except CatalogError:
+                LOG.info("Similar lookup skipped (user=%s)", user_id)
+        raw = apply_mood(raw, mood)
         narrowed = select_candidates(
             raw, excluded_shikimori_ids=excluded, excluded_series_ids=library,
             excluded_franchises=franchises, already_recommended_ids=recommended,
@@ -207,7 +237,8 @@ class RecommendationService:
         if load_related:
             watched = [rate["external_anime_id"] for rate in rates if rate["status"] in WATCHED_STATUSES]
             if watched:
-                metadata = {**metadata, **await self.catalog.metadata(watched[:CONTINUATION_SOURCE_LIMIT], related=True)}
+                metadata = {**metadata, **await self._cached_metadata(
+                watched[:CONTINUATION_SOURCE_LIMIT], related=True)}
         found = find_continuations(rates, metadata)
         resolved = await resolve_candidates(self.anime, [
             {"id": item["shikimori_anime_id"], "mal_id": item.get("mal_id"), "title": item["title"],
