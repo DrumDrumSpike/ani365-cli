@@ -58,7 +58,8 @@ def build_user_prompt(profile, feedback, recommended_ids, candidates):
     if median is None:
         scale_line = "Личная шкала: ещё нет просмотренных тайтлов с оценкой."
     else:
-        scale_line = (f"Личная шкала по статусу completed: медиана {median:g}, разброс {spread:g}, "
+        scale_line = (f"Личная шкала по статусу completed: медиана {median:g}, "
+                      f"разброс {(spread if isinstance(spread, (int, float)) else 1):g}, "
                       f"оценок {scale.get('count', 0)}. Оценка около медианы — слабый сигнал.")
     titles = profile.get("titles") or []
     strong = [_title_line(row) for row in titles if row.get("signal") in {"stands_out", "above_typical"}]
@@ -66,6 +67,8 @@ def build_user_prompt(profile, feedback, recommended_ids, candidates):
     low = [_title_line(row) for row in titles if row.get("signal") in {"below_typical", "stands_out_low"}]
     watching = [_title_line(row) for row in titles if row.get("status") in {"watching", "rewatching", "on_hold"}
                 and row.get("signal") is None]
+    unrated_completed = [_title_line(row) for row in titles
+                         if row.get("status") == "completed" and row.get("score") is None]
     dropped = [_title_line(row) for row in profile.get("dropped") or ()]
     feedback_lines = []
     for item in list(feedback or [])[:5]:
@@ -75,7 +78,10 @@ def build_user_prompt(profile, feedback, recommended_ids, candidates):
         elif rating is None:
             verdict = "без оценки пары"
         else:
-            verdict = f"оценка пары {int(rating)} из 10"
+            try:
+                verdict = f"оценка пары {int(rating)} из 10"
+            except (TypeError, ValueError):
+                verdict = "без оценки пары"
         liked = ", ".join(_clip(title, 60) for title in item.get("interested_titles") or []) or "ни один не отмечен"
         feedback_lines.append(f"{item.get('source')}: {verdict}; заинтересовали: {liked}")
     history = [str(value) for value in recommended_ids if str(value).isdigit()]
@@ -83,7 +89,9 @@ def build_user_prompt(profile, feedback, recommended_ids, candidates):
         ", ".join(history[:80]) + ("…" if len(history) > 80 else "") if history else "нет")
     candidate_lines = []
     for candidate in candidates or ():
-        genres = candidate.get("genres") or []
+        if not isinstance(candidate, dict):
+            continue
+        genres = candidate.get("genres") if isinstance(candidate.get("genres"), (list, tuple)) else ()
         names = []
         for genre in genres:
             if isinstance(genre, dict):
@@ -101,6 +109,7 @@ def build_user_prompt(profile, feedback, recommended_ids, candidates):
         _section("Обычный уровень:", typical, 6),
         _section("Ниже обычного:", low, 6),
         _section("Смотрит или отложил без отдельной сильной оценки:", watching, 6),
+        _section("Просмотрено без оценки (в списке, на шкалу не влияет):", unrated_completed, 6),
         _section("Брошено (флаг отдельный от оценки, жанры не штрафуются автоматически):", dropped, 8),
         _section("Недавние отзывы на пары (только контекст, веса жанров не меняются):", feedback_lines, 5),
         history_line,

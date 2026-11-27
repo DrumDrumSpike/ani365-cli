@@ -32,12 +32,15 @@ def normalize_anime(row, *, include_related=False):
     except (TypeError, ValueError):
         year = None
     genres = []
-    for genre in row.get("genres") or ():
-        if isinstance(genre, dict) and str(genre.get("id") or "").strip() and str(genre.get("name") or "").strip():
-            genres.append({"id": str(genre["id"]), "name": str(genre["name"])[:80]})
+    raw_genres = row.get("genres")
+    if isinstance(raw_genres, (list, tuple)):
+        for genre in raw_genres:
+            if isinstance(genre, dict) and str(genre.get("id") or "").strip() and str(genre.get("name") or "").strip():
+                genres.append({"id": str(genre["id"]), "name": str(genre["name"])[:80]})
     related = []
-    if include_related:
-        for relation in row.get("related") or ():
+    raw_related = row.get("related")
+    if include_related and isinstance(raw_related, (list, tuple)):
+        for relation in raw_related:
             if not isinstance(relation, dict):
                 continue
             anime = normalize_anime(relation.get("anime"), include_related=False)

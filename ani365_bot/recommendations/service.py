@@ -108,7 +108,8 @@ class RecommendationService:
                 return
             prompt = build_user_prompt(
                 profile, self.store.recent_recommendation_feedback(user_id, limit=5),
-                sorted(self.store.recommended_shikimori_ids(user_id), key=int), candidates)
+                sorted((value for value in self.store.recommended_shikimori_ids(user_id)
+                        if str(value).isdigit()), key=int), candidates)
             raw = await self._complete(job_id, client, prompt)
             try:
                 picks = parse_picks(raw, [item["id"] for item in candidates])
@@ -132,9 +133,12 @@ class RecommendationService:
                 "Shikimori временно недоступен. Прошлая подборка сохранена.", now=self._now())
         except Exception:
             LOG.exception("Recommendation job failed (user=%s source=%s)", user_id, source)
-            self.store.fail_recommendation_job(
-                job_id, "unavailable",
-                user_message(source, "unavailable") + " Прошлая подборка сохранена.", now=self._now())
+            called = bool((self.store.recommendation_job(job_id) or {}).get("api_called"))
+            if called:
+                code, message = "unavailable", user_message(source, "unavailable") + " Прошлая подборка сохранена."
+            else:
+                code, message = "profile", "Не удалось подготовить профиль. Прошлая подборка сохранена."
+            self.store.fail_recommendation_job(job_id, code, message, now=self._now())
 
     async def refresh_continuations(self, user_id):
         if not self.store.external_account_status(user_id, "shikimori")["connected"]:
@@ -164,7 +168,9 @@ class RecommendationService:
         genres = top_genres(profile["genre_weights"], limit=4)
         if not genres:
             return []
-        excluded = {rate["external_anime_id"] for rate in rates}
+        excluded = {str(rate.get("external_anime_id") or "").strip() for rate in rates
+                    if isinstance(rate, dict)}
+        excluded.discard("")
         franchises = user_franchises(rates, metadata)
         recommended = self.store.recommended_shikimori_ids(user_id)
         library = set((self.store.recommendation_profile(user_id) or {}).get("excluded_anime365_series_ids") or ())

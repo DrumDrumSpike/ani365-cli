@@ -37,9 +37,18 @@ def _genres(anime):
 
 
 def score_distribution(scores):
-    """Median and spread of completed scores. Spread is at least one point."""
-    values = sorted(_score(score) for score in scores)
-    values = [score for score in values if score is not None]
+    """Median and spread of completed scores. Spread is at least one point.
+
+    Unrated titles (``None`` or Shikimori's zero) and values outside 1–10 are
+    left out. Sorting happens only after that filter: ``None`` cannot be
+    ordered against an integer score.
+    """
+    values = []
+    for score in scores or ():
+        normalized = _score(score)
+        if normalized is not None:
+            values.append(normalized)
+    values.sort()
     if not values:
         return {"median": None, "spread": None, "count": 0}
     count = len(values)
@@ -82,18 +91,23 @@ def relative_signal(score, distribution):
 
 def taste_profile(rates, metadata_by_id=None):
     """Build a compact profile. Genre weights ignore dropped titles."""
-    metadata_by_id = metadata_by_id or {}
-    completed_scores = [_score(rate.get("score")) for rate in rates or ()
-                        if str(rate.get("status") or "") == "completed"]
+    if not isinstance(metadata_by_id, dict):
+        metadata_by_id = {}
+    completed_scores = [rate.get("score") for rate in rates or () if isinstance(rate, dict)
+                        and str(rate.get("status") or "") == "completed"]
     distribution = score_distribution(completed_scores)
     weights = {}
     titles, dropped = [], []
     for rate in rates or ():
+        if not isinstance(rate, dict):
+            continue
         status = str(rate.get("status") or "")
         if status not in SCORED_STATUSES | {"dropped"}:
             continue
         identifier = str(rate.get("external_anime_id") or "").strip()
-        anime = metadata_by_id.get(identifier) or {}
+        anime = metadata_by_id.get(identifier)
+        if not isinstance(anime, dict):
+            anime = {}
         genres = _genres(anime)
         score = _score(rate.get("score"))
         title = str(rate.get("title") or anime.get("title") or "").strip()[:180] or "Без названия"
