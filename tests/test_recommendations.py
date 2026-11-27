@@ -469,27 +469,46 @@ class ServiceTests(unittest.TestCase):
 
 class LLMHttpTests(unittest.TestCase):
     def test_status_codes_become_russian_errors_without_the_body(self):
+        seen = {}
+
         def handler(request):
+            seen["body"] = json.loads(request.content)
             if request.url.path.endswith("/429"):
                 return httpx.Response(429, json={"error": {"code": "insufficient_quota", "message": "secret-body"}})
             if request.url.path.endswith("/401"):
                 return httpx.Response(401, json={"error": {"message": "bad key"}})
-            raise httpx.TimeoutException("slow")
+            if request.url.path.endswith("/slow"):
+                raise httpx.ReadTimeout("slow reasoning")
+            return httpx.Response(200, json={"choices": [{"message": {"content": "{\"picks\": []}"}}]})
 
         async def run():
-            limited = ChatCompletionsClient(source="openai", api_key="secret", model="gpt-6-luna",
+            limited = ChatCompletionsClient(source="openai", api_key="secret", model="gpt-5.4-mini",
                                             url="https://api.openai.com/429", transport=httpx.MockTransport(handler))
             with self.assertRaises(LLMError) as quota:
                 await limited.complete("system", "user")
             self.assertEqual(quota.exception.code, "rate_limited")
             self.assertNotIn("secret", str(quota.exception))
-            denied = ChatCompletionsClient(source="xai", api_key="secret", model="grok-4.3",
-                                           url="https://api.x.ai/401", transport=httpx.MockTransport(handler))
+            self.assertEqual(seen["body"]["model"], "gpt-5.4-mini")
+            self.assertEqual(seen["body"]["reasoning_effort"], "medium")
+            self.assertGreaterEqual(seen["body"]["max_completion_tokens"], 4096)
+            self.assertEqual(seen["body"]["response_format"]["type"], "json_schema")
+            self.assertNotIn("temperature", seen["body"])
+            denied = ChatCompletionsClient(source="xai", api_key="secret", model="grok-4.7",
+                                           url="https://api.x.ai/401", reasoning_effort="medium",
+                                           transport=httpx.MockTransport(handler))
             with self.assertRaises(LLMError) as auth:
                 await denied.complete("system", "user")
             self.assertEqual(auth.exception.code, "unauthorized")
             self.assertIn("XAI_API_KEY", str(auth.exception))
-            missing = ChatCompletionsClient(source="openai", api_key="", model="gpt-6-luna",
+            self.assertEqual(seen["body"]["reasoning_effort"], "medium")
+            slow = ChatCompletionsClient(source="openai", api_key="secret", model="gpt-5.4-mini",
+                                         url="https://api.openai.com/slow", timeout=180,
+                                         transport=httpx.MockTransport(handler))
+            with self.assertRaises(LLMError) as timed_out:
+                await slow.complete("system", "user")
+            self.assertEqual(timed_out.exception.code, "timeout")
+            self.assertEqual(slow.timeout, 180)
+            missing = ChatCompletionsClient(source="openai", api_key="", model="gpt-5.4-mini",
                                             url="https://api.openai.com/v1/chat/completions")
             with self.assertRaises(LLMError) as absent:
                 await missing.complete("system", "user")

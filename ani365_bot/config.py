@@ -31,13 +31,14 @@ class Config:
     hentai_token: str = ""
     mal_client_id: str = ""
     openai_api_key: str = ""
-    openai_model: str = "gpt-6-luna"
-    openai_reasoning_effort: str = "none"
+    openai_model: str = "gpt-5.4-mini"
+    openai_reasoning_effort: str = "medium"
     xai_api_key: str = ""
-    xai_model: str = "grok-4.3"
-    xai_reasoning_effort: str = "none"
+    xai_model: str = "grok-4.7"
+    xai_reasoning_effort: str = "medium"
     recommendation_daily_limit: int = 5
     recommendation_candidate_limit: int = 36
+    recommendation_llm_timeout: int = 180
 
     @classmethod
     def from_env(cls):
@@ -76,19 +77,24 @@ class Config:
             raise ConfigError("MAL_CLIENT_ID must be a single client identifier")
         openai_api_key = _optional_secret("OPENAI_API_KEY")
         xai_api_key = _optional_secret("XAI_API_KEY")
-        openai_model = _model_id("OPENAI_MODEL", "gpt-6-luna")
-        xai_model = _model_id("XAI_MODEL", "grok-4.3")
+        openai_model = _model_id("OPENAI_MODEL", "gpt-5.4-mini")
+        xai_model = _model_id("XAI_MODEL", "grok-4.7")
         openai_reasoning_effort = _reasoning_effort("OPENAI_REASONING_EFFORT")
         xai_reasoning_effort = _reasoning_effort("XAI_REASONING_EFFORT")
         try:
             recommendation_daily_limit = int(os.environ.get("RECOMMENDATION_DAILY_LIMIT", "5"))
             recommendation_candidate_limit = int(os.environ.get("RECOMMENDATION_CANDIDATE_LIMIT", "36"))
+            recommendation_llm_timeout = int(os.environ.get("RECOMMENDATION_LLM_TIMEOUT", "180"))
         except ValueError:
-            raise ConfigError("RECOMMENDATION_DAILY_LIMIT and RECOMMENDATION_CANDIDATE_LIMIT must be integers") from None
+            raise ConfigError(
+                "RECOMMENDATION_DAILY_LIMIT, RECOMMENDATION_CANDIDATE_LIMIT and "
+                "RECOMMENDATION_LLM_TIMEOUT must be integers") from None
         if not 1 <= recommendation_daily_limit <= 50:
             raise ConfigError("RECOMMENDATION_DAILY_LIMIT must be from 1 to 50")
         if not 10 <= recommendation_candidate_limit <= 40:
             raise ConfigError("RECOMMENDATION_CANDIDATE_LIMIT must be from 10 to 40")
+        if not 30 <= recommendation_llm_timeout <= 300:
+            raise ConfigError("RECOMMENDATION_LLM_TIMEOUT must be from 30 to 300 seconds")
         telegram_url = os.environ.get("TELEGRAM_BOT_API_URL", cls.telegram_url).rstrip("/")
         telegram = urlsplit(telegram_url)
         if (telegram.scheme not in ("http", "https") or not telegram.hostname or telegram.username
@@ -147,7 +153,8 @@ class Config:
                    download_workers, download_ttl, shikimori_id, shikimori_secret, shikimori_redirect,
                    shikimori_import_interval, anime_token, hentai_url, hentai_token, mal_client_id,
                    openai_api_key, openai_model, openai_reasoning_effort, xai_api_key, xai_model,
-                   xai_reasoning_effort, recommendation_daily_limit, recommendation_candidate_limit)
+                   xai_reasoning_effort, recommendation_daily_limit, recommendation_candidate_limit,
+                   recommendation_llm_timeout)
 
 
 def _optional_secret(name):
@@ -168,7 +175,7 @@ def _model_id(name, default):
 def _reasoning_effort(name):
     raw = os.environ.get(name)
     if raw is None:
-        return "none"
+        return "medium"
     value = raw.strip().lower()
     if value in ("", "off", "omit"):
         return ""

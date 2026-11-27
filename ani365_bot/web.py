@@ -574,11 +574,13 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
             "openai": ChatCompletionsClient(
                 source="openai", api_key=config.openai_api_key, model=config.openai_model,
                 url="https://api.openai.com/v1/chat/completions",
-                reasoning_effort=config.openai_reasoning_effort),
+                reasoning_effort=config.openai_reasoning_effort,
+                timeout=config.recommendation_llm_timeout),
             "xai": ChatCompletionsClient(
                 source="xai", api_key=config.xai_api_key, model=config.xai_model,
                 url="https://api.x.ai/v1/chat/completions",
-                reasoning_effort=config.xai_reasoning_effort),
+                reasoning_effort=config.xai_reasoning_effort,
+                timeout=config.recommendation_llm_timeout),
         }, daily_limit=config.recommendation_daily_limit,
         candidate_limit=config.recommendation_candidate_limit, anime_url=config.anime_url)
     app.state.recommendation_tasks = {}

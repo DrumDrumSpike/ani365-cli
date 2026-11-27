@@ -49,19 +49,22 @@ watching и rewatching. Сиквел не показывается, если о�
 | Переменная | По умолчанию | Назначение |
 | --- | --- | --- |
 | `OPENAI_API_KEY` | пусто | ключ ChatGPT |
-| `OPENAI_MODEL` | `gpt-6-luna` | дешёвая модель со structured output |
-| `OPENAI_REASONING_EFFORT` | `none` | не тратить reasoning-токены |
+| `OPENAI_MODEL` | `gpt-5.4-mini` | Chat Completions, JSON schema, reasoning |
+| `OPENAI_REASONING_EFFORT` | `medium` | `none`, `low`, `medium`, `high`, `xhigh`, `max` |
 | `XAI_API_KEY` | пусто | ключ Grok |
-| `XAI_MODEL` | `grok-4.3` | самый дешёвый текущий текстовый Grok со structured output |
-| `XAI_REASONING_EFFORT` | `none` | без reasoning |
+| `XAI_MODEL` | `grok-4.7` | Chat Completions, JSON schema, reasoning |
+| `XAI_REASONING_EFFORT` | `medium` | у grok-4.7 нет `none`: `low`, `medium`, `high`, `xhigh` |
 | `RECOMMENDATION_DAILY_LIMIT` | `5` | вызовов API на пользователя и источник за 24 часа |
 | `RECOMMENDATION_CANDIDATE_LIMIT` | `36` | кандидатов в одном промпте |
+| `RECOMMENDATION_LLM_TIMEOUT` | `180` | секунд на чтение одного ответа модели |
 
-Цены на ноябрь 2026: gpt-6-luna — $0.10 / $0.50 за 1M токенов, grok-4.3 —
-$1.25 / $2.50. Компактный промпт около 2.5 тысяч токенов и ответ около 200
-токенов дают примерно $0.0004 за клик ChatGPT и $0.004 за клик Grok. Повтор
-при неверном JSON удваивает только этот клик. Пять пользователей на потолке
-лимита Grok — около $3 в месяц.
+Цены на ноябрь 2026, стандартный контекст короче 200 тысяч токенов.
+`gpt-5.4-mini`: $0.75 за 1M входных и $4.50 за 1M выходных, включая токены
+рассуждения. `grok-4.7`: $2 и $6 за 1M. Для промпта около 3 тысяч токенов и
+около 2.3 тысячи токенов ответа с reasoning уровня medium это примерно $0.012
+за клик ChatGPT и $0.020 за клик Grok. 200 запусков одного источника — около
+$2.50 и $4. Повтор при неверном JSON удваивает только этот клик. Лимит ответа
+`max_completion_tokens` равен 4096, чтобы рассуждение не съело видимый JSON.
 
 Ошибки на русском: нет ключа, 401, 429 или закончившийся баланс, таймаут,
 недоступность, неверный ответ. Они не скрывают прошлую подборку этого источника.

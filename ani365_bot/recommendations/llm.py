@@ -65,7 +65,11 @@ def user_message(source, code):
 class ChatCompletionsClient:
     """OpenAI-compatible chat completions with a strict JSON schema."""
 
-    def __init__(self, *, source, api_key, model, url, reasoning_effort="none", timeout=45, transport=None):
+    # Reasoning tokens count against this cap and are billed as output tokens.
+    # Medium effort on a short JSON answer needs room beyond the visible reply.
+    max_completion_tokens = 4096
+
+    def __init__(self, *, source, api_key, model, url, reasoning_effort="medium", timeout=180, transport=None):
         self.source = source
         self.api_key = api_key or ""
         self.model = model
@@ -82,8 +86,7 @@ class ChatCompletionsClient:
             raise LLMError("missing_key", user_message(self.source, "missing_key"))
         body = {
             "model": self.model,
-            "temperature": 0.2,
-            "max_completion_tokens": 500,
+            "max_completion_tokens": self.max_completion_tokens,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -93,11 +96,20 @@ class ChatCompletionsClient:
                 "json_schema": {"name": "anime_picks", "strict": True, "schema": PICK_SCHEMA},
             },
         }
-        if self.reasoning_effort:
+        # A custom temperature is rejected by several reasoning models. Keep it
+        # only when reasoning is explicitly turned off.
+        if self.reasoning_effort and self.reasoning_effort != "none":
             body["reasoning_effort"] = self.reasoning_effort
+        else:
+            body["temperature"] = 0.2
+            if self.reasoning_effort == "none":
+                body["reasoning_effort"] = "none"
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        # Connect should fail quickly. Reading the body may take as long as the
+        # reasoning effort needs; the Mini App request itself already returned.
+        timeout = httpx.Timeout(self.timeout, connect=20)
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
+            async with httpx.AsyncClient(timeout=timeout, transport=self.transport) as client:
                 response = await client.post(self.url, json=body, headers=headers)
         except httpx.TimeoutException:
             raise LLMError("timeout", user_message(self.source, "timeout")) from None
