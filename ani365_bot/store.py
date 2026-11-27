@@ -8,7 +8,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 
 HENTAI_SERIES_OFFSET = 1_000_000_000_000
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 
 class StateError(ValueError):
@@ -148,6 +148,11 @@ class Store:
                 if "quality" not in columns:
                     self.db.execute("ALTER TABLE playback_progress ADD COLUMN quality INTEGER")
                 self.db.execute("PRAGMA user_version = 14")
+            version = 14
+        if version < 15:
+            with self.db:
+                self._create_v15()
+                self.db.execute("PRAGMA user_version = 15")
 
     def seasonal_snapshot(self):
         row = self.db.execute("SELECT payload FROM seasonal_catalog WHERE id=1").fetchone()
@@ -471,6 +476,95 @@ class Store:
         self.db.execute("""
             CREATE INDEX IF NOT EXISTS recommendation_items_feed_idx
             ON recommendation_items(user_id, rank)
+        """)
+
+    def _create_v15(self):
+        """Replace the shared weekly feed with per-user, per-source LLM picks."""
+        self.db.execute("DROP TABLE IF EXISTS recommendation_items")
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS recommendation_jobs (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                source TEXT NOT NULL CHECK(source IN ('openai', 'xai')),
+                state TEXT NOT NULL CHECK(state IN ('queued', 'running', 'ready', 'failed')),
+                requested_at REAL NOT NULL,
+                started_at REAL,
+                finished_at REAL,
+                error_code TEXT,
+                error_message TEXT,
+                api_called INTEGER NOT NULL DEFAULT 0 CHECK(api_called IN (0, 1)),
+                attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0)
+            )
+        """)
+        self.db.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS recommendation_jobs_active_idx
+            ON recommendation_jobs(user_id, source)
+            WHERE state IN ('queued', 'running')
+        """)
+        self.db.execute("""
+            CREATE INDEX IF NOT EXISTS recommendation_jobs_user_idx
+            ON recommendation_jobs(user_id, source, requested_at DESC)
+        """)
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS recommendation_picks (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                source TEXT NOT NULL CHECK(source IN ('openai', 'xai')),
+                job_id INTEGER,
+                created_at REAL NOT NULL,
+                pair_rating INTEGER CHECK(pair_rating IS NULL OR pair_rating BETWEEN 1 AND 10),
+                pair_skipped INTEGER NOT NULL DEFAULT 0 CHECK(pair_skipped IN (0, 1)),
+                feedback_at REAL
+            )
+        """)
+        self.db.execute("""
+            CREATE INDEX IF NOT EXISTS recommendation_picks_history_idx
+            ON recommendation_picks(user_id, source, created_at DESC)
+        """)
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS recommendation_pick_items (
+                pick_id INTEGER NOT NULL,
+                position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 1),
+                shikimori_anime_id TEXT NOT NULL,
+                mal_id TEXT,
+                anime365_series_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                year TEXT,
+                kind TEXT,
+                genres TEXT,
+                poster_url TEXT,
+                reason TEXT NOT NULL,
+                franchise TEXT,
+                interested INTEGER CHECK(interested IS NULL OR interested IN (0, 1)),
+                PRIMARY KEY(pick_id, position),
+                FOREIGN KEY(pick_id) REFERENCES recommendation_picks(id) ON DELETE CASCADE
+            )
+        """)
+        self.db.execute("""
+            CREATE INDEX IF NOT EXISTS recommendation_pick_items_anime_idx
+            ON recommendation_pick_items(shikimori_anime_id)
+        """)
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS recommendation_continuations (
+                user_id INTEGER NOT NULL,
+                shikimori_anime_id TEXT NOT NULL,
+                mal_id TEXT,
+                anime365_series_id INTEGER,
+                title TEXT NOT NULL,
+                year TEXT,
+                kind TEXT,
+                poster_url TEXT,
+                after_title TEXT NOT NULL,
+                after_shikimori_anime_id TEXT NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(user_id, shikimori_anime_id)
+            )
+        """)
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS recommendation_continuation_state (
+                user_id INTEGER PRIMARY KEY,
+                updated_at REAL NOT NULL
+            )
         """)
 
     @staticmethod
@@ -1086,67 +1180,425 @@ class Store:
             "excluded_anime365_series_ids": [int(row[0]) for row in excluded],
         }
 
-    def replace_recommendations(self, user_id, items, *, generated_at=None):
-        """Atomically replace one user's ready feed with validated public cards."""
+    _RECOMMENDATION_SOURCES = frozenset({"openai", "xai"})
+
+    def _recommendation_source(self, source):
+        source = str(source or "").strip()
+        if source not in self._RECOMMENDATION_SOURCES:
+            raise ValueError("Unknown recommendation source")
+        return source
+
+    def _recommendation_job(self, row):
+        if not row:
+            return None
+        keys = ("id", "user_id", "source", "state", "requested_at", "started_at", "finished_at",
+                "error_code", "error_message", "api_called", "attempts")
+        job = dict(zip(keys, row))
+        job["api_called"] = bool(job["api_called"])
+        return job
+
+    def recommendation_job(self, job_id):
+        row = self.db.execute("""
+            SELECT id, user_id, source, state, requested_at, started_at, finished_at,
+                   error_code, error_message, api_called, attempts
+            FROM recommendation_jobs WHERE id=?
+        """, (int(job_id),)).fetchone()
+        return self._recommendation_job(row)
+
+    def active_recommendation_job(self, user_id, source):
         user_id = self._positive_id(user_id, "user_id")
-        timestamp = self._now(generated_at)
+        source = self._recommendation_source(source)
+        row = self.db.execute("""
+            SELECT id, user_id, source, state, requested_at, started_at, finished_at,
+                   error_code, error_message, api_called, attempts
+            FROM recommendation_jobs
+            WHERE user_id=? AND source=? AND state IN ('queued', 'running')
+            ORDER BY id DESC LIMIT 1
+        """, (user_id, source)).fetchone()
+        return self._recommendation_job(row)
+
+    def latest_recommendation_job(self, user_id, source):
+        user_id = self._positive_id(user_id, "user_id")
+        source = self._recommendation_source(source)
+        row = self.db.execute("""
+            SELECT id, user_id, source, state, requested_at, started_at, finished_at,
+                   error_code, error_message, api_called, attempts
+            FROM recommendation_jobs
+            WHERE user_id=? AND source=?
+            ORDER BY requested_at DESC, id DESC LIMIT 1
+        """, (user_id, source)).fetchone()
+        return self._recommendation_job(row)
+
+    def enqueue_recommendation_job(self, user_id, source, *, now=None):
+        """Insert a queued job unless this user and source already has an active one."""
+        user_id = self._positive_id(user_id, "user_id")
+        source = self._recommendation_source(source)
+        moment = self._now(now)
+        with self.db:
+            existing = self.db.execute("""
+                SELECT id FROM recommendation_jobs
+                WHERE user_id=? AND source=? AND state IN ('queued', 'running')
+                ORDER BY id DESC LIMIT 1
+            """, (user_id, source)).fetchone()
+            if existing:
+                job_id, created = int(existing[0]), False
+            else:
+                try:
+                    cursor = self.db.execute("""
+                        INSERT INTO recommendation_jobs(
+                            user_id, source, state, requested_at, api_called, attempts
+                        ) VALUES (?, ?, 'queued', ?, 0, 0)
+                    """, (user_id, source, moment))
+                    job_id, created = int(cursor.lastrowid), True
+                except sqlite3.IntegrityError:
+                    row = self.db.execute("""
+                        SELECT id FROM recommendation_jobs
+                        WHERE user_id=? AND source=? AND state IN ('queued', 'running')
+                        ORDER BY id DESC LIMIT 1
+                    """, (user_id, source)).fetchone()
+                    job_id, created = int(row[0]), False
+        return self.recommendation_job(job_id), created
+
+    def mark_recommendation_job_running(self, job_id, *, now=None):
+        moment = self._now(now)
+        with self.db:
+            cursor = self.db.execute("""
+                UPDATE recommendation_jobs
+                SET state='running', started_at=?
+                WHERE id=? AND state='queued' AND api_called=0
+            """, (moment, int(job_id)))
+        return bool(cursor.rowcount)
+
+    def mark_recommendation_api_called(self, job_id):
+        """Commit the API claim before the HTTP request so a restart cannot repeat it."""
+        with self.db:
+            cursor = self.db.execute("""
+                UPDATE recommendation_jobs
+                SET api_called=1, attempts=1
+                WHERE id=? AND state='running' AND api_called=0
+            """, (int(job_id),))
+        return bool(cursor.rowcount)
+
+    def mark_recommendation_retry(self, job_id):
+        """Allow exactly one extra model call after a malformed response."""
+        with self.db:
+            cursor = self.db.execute("""
+                UPDATE recommendation_jobs
+                SET attempts=2
+                WHERE id=? AND state='running' AND api_called=1 AND attempts=1
+            """, (int(job_id),))
+        return bool(cursor.rowcount)
+
+    def requeue_recommendation_job(self, job_id):
+        with self.db:
+            self.db.execute("""
+                UPDATE recommendation_jobs
+                SET state='queued', started_at=NULL
+                WHERE id=? AND api_called=0 AND state='running'
+            """, (int(job_id),))
+
+    def fail_recommendation_job(self, job_id, code, message, *, now=None):
+        moment = self._now(now)
+        with self.db:
+            self.db.execute("""
+                UPDATE recommendation_jobs
+                SET state='failed', finished_at=?, error_code=?, error_message=?
+                WHERE id=? AND state IN ('queued', 'running')
+            """, (moment, str(code or "unavailable")[:64], str(message or "")[:300], int(job_id)))
+        return self.recommendation_job(job_id)
+
+    def unfinished_recommendation_jobs(self):
+        rows = self.db.execute("""
+            SELECT id, user_id, source, state, requested_at, started_at, finished_at,
+                   error_code, error_message, api_called, attempts
+            FROM recommendation_jobs
+            WHERE state IN ('queued', 'running')
+            ORDER BY id ASC
+        """).fetchall()
+        return [self._recommendation_job(row) for row in rows]
+
+    def recommendation_api_calls_since(self, user_id, source, since):
+        user_id = self._positive_id(user_id, "user_id")
+        source = self._recommendation_source(source)
+        row = self.db.execute("""
+            SELECT COUNT(*) FROM recommendation_jobs
+            WHERE user_id=? AND source=? AND api_called=1 AND requested_at>=?
+        """, (user_id, source, float(since))).fetchone()
+        return int(row[0])
+
+    def _pick_items(self, pick_ids):
+        result = {pick_id: [] for pick_id in pick_ids}
+        if not pick_ids:
+            return result
+        for offset in range(0, len(pick_ids), 900):
+            batch = pick_ids[offset:offset + 900]
+            placeholders = ", ".join("?" for _ in batch)
+            rows = self.db.execute(f"""
+                SELECT pick_id, position, shikimori_anime_id, mal_id, anime365_series_id, title,
+                       year, kind, genres, poster_url, reason, franchise, interested
+                FROM recommendation_pick_items
+                WHERE pick_id IN ({placeholders})
+                ORDER BY pick_id, position
+            """, batch).fetchall()
+            for row in rows:
+                try:
+                    genres = json.loads(row[8]) if row[8] else []
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    genres = []
+                if not isinstance(genres, list):
+                    genres = []
+                result.setdefault(int(row[0]), []).append({
+                    "position": int(row[1]), "shikimori_anime_id": row[2], "mal_id": row[3],
+                    "anime365_series_id": int(row[4]), "title": row[5], "year": row[6],
+                    "kind": row[7], "genres": [str(value) for value in genres],
+                    "poster_url": row[9], "reason": row[10], "franchise": row[11],
+                    "interested": None if row[12] is None else bool(row[12]),
+                })
+        return result
+
+    def _pick(self, row, items):
+        if not row:
+            return None
+        pick = {"id": int(row[0]), "user_id": int(row[1]), "source": row[2], "job_id": row[3],
+                "created_at": float(row[4]), "pair_rating": row[5],
+                "pair_skipped": bool(row[6]), "feedback_at": row[7],
+                "items": items.get(int(row[0]), [])}
+        return pick
+
+    def _load_picks(self, rows):
+        items = self._pick_items([int(row[0]) for row in rows])
+        return [self._pick(row, items) for row in rows]
+
+    def complete_recommendation_job(self, job_id, user_id, source, items, *, now=None):
+        """Store the new pick and mark the job ready in one transaction."""
+        user_id = self._positive_id(user_id, "user_id")
+        source = self._recommendation_source(source)
+        moment = self._now(now)
         values, seen = [], set()
-        for position, item in enumerate(items or (), start=1):
+        for item in items or ():
             try:
                 series_id = self._positive_id(item.get("anime365_series_id"), "anime365_series_id")
-                score = float(item.get("score"))
             except (AttributeError, TypeError, ValueError):
                 continue
-            shikimori_id = str(item.get("shikimori_anime_id") or "").strip()[:32]
-            title = str(item.get("title") or "").strip()[:500]
-            reason = str(item.get("reason") or "").strip()[:300]
-            if series_id in seen or not shikimori_id or not title or not reason:
+            shikimori_id = str(item.get("id") or item.get("shikimori_anime_id") or "").strip()
+            title = str(item.get("title") or "").strip()[:180]
+            reason = " ".join(str(item.get("reason") or "").split())[:400]
+            if not shikimori_id.isdigit() or not title or not reason or shikimori_id in seen or series_id in {
+                    row[3] for row in values}:
                 continue
-            seen.add(series_id)
-            values.append((user_id, series_id, shikimori_id, len(values) + 1, score, title,
-                           str(item.get("year") or "").strip()[:32] or None,
-                           str(item.get("series_type") or "").strip()[:64] or None,
+            seen.add(shikimori_id)
+            genres = []
+            for genre in item.get("genres") or ():
+                name = genre.get("name") if isinstance(genre, dict) else genre
+                name = str(name or "").strip()
+                if name:
+                    genres.append(name[:80])
+            values.append((len(values), shikimori_id, str(item.get("mal_id") or "").strip() or None,
+                           series_id, title, str(item.get("year") or "").strip()[:32] or None,
+                           str(item.get("kind") or item.get("series_type") or "").strip()[:32] or None,
+                           json.dumps(genres[:8], ensure_ascii=False),
                            str(item.get("poster_url") or "").strip()[:1000] or None,
-                           reason, timestamp))
-            if len(values) == 50:
+                           reason, str(item.get("franchise") or "").strip()[:120] or None))
+            if len(values) == 2:
                 break
         with self.db:
-            self.db.execute("DELETE FROM recommendation_items WHERE user_id=?", (user_id,))
+            current = self.db.execute(
+                "SELECT state FROM recommendation_jobs WHERE id=? AND user_id=? AND source=?",
+                (int(job_id), user_id, source)).fetchone()
+            if not current or current[0] != "running":
+                return None
+            cursor = self.db.execute("""
+                INSERT INTO recommendation_picks(user_id, source, job_id, created_at, pair_skipped)
+                VALUES (?, ?, ?, ?, 0)
+            """, (user_id, source, int(job_id), moment))
+            pick_id = int(cursor.lastrowid)
             self.db.executemany("""
-                INSERT INTO recommendation_items(
-                    user_id, anime365_series_id, shikimori_anime_id, rank, score, title,
-                    year, series_type, poster_url, reason, generated_at
+                INSERT INTO recommendation_pick_items(
+                    pick_id, position, shikimori_anime_id, mal_id, anime365_series_id, title, year,
+                    kind, genres, poster_url, reason, franchise
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, [(pick_id, *row) for row in values])
+            self.db.execute("""
+                UPDATE recommendation_jobs
+                SET state='ready', finished_at=?, error_code=NULL, error_message=NULL
+                WHERE id=? AND state='running'
+            """, (moment, int(job_id)))
+        return self.recommendation_pick(user_id, pick_id)
+
+    def recommendation_pick(self, user_id, pick_id):
+        user_id = self._positive_id(user_id, "user_id")
+        row = self.db.execute("""
+            SELECT id, user_id, source, job_id, created_at, pair_rating, pair_skipped, feedback_at
+            FROM recommendation_picks WHERE id=? AND user_id=?
+        """, (int(pick_id), user_id)).fetchone()
+        if not row:
+            return None
+        return self._load_picks([row])[0]
+
+    def latest_recommendation_pick(self, user_id, source):
+        user_id = self._positive_id(user_id, "user_id")
+        source = self._recommendation_source(source)
+        row = self.db.execute("""
+            SELECT id, user_id, source, job_id, created_at, pair_rating, pair_skipped, feedback_at
+            FROM recommendation_picks WHERE user_id=? AND source=?
+            ORDER BY created_at DESC, id DESC LIMIT 1
+        """, (user_id, source)).fetchone()
+        if not row:
+            return None
+        return self._load_picks([row])[0]
+
+    def recommendation_history(self, user_id, source=None, *, limit=50, offset=0):
+        user_id = self._positive_id(user_id, "user_id")
+        limit = max(1, min(100, int(limit)))
+        offset = max(0, int(offset))
+        params = [user_id]
+        where = "user_id=?"
+        if source is not None:
+            where += " AND source=?"
+            params.append(self._recommendation_source(source))
+        rows = self.db.execute(f"""
+            SELECT id, user_id, source, job_id, created_at, pair_rating, pair_skipped, feedback_at
+            FROM recommendation_picks WHERE {where}
+            ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
+        """, [*params, limit, offset]).fetchall()
+        return self._load_picks(rows)
+
+    def recommended_shikimori_ids(self, user_id):
+        user_id = self._positive_id(user_id, "user_id")
+        rows = self.db.execute("""
+            SELECT DISTINCT items.shikimori_anime_id
+            FROM recommendation_pick_items AS items
+            JOIN recommendation_picks AS picks ON picks.id=items.pick_id
+            WHERE picks.user_id=?
+        """, (user_id,)).fetchall()
+        return {str(row[0]) for row in rows}
+
+    def recent_recommendation_feedback(self, user_id, limit=5):
+        """Pair ratings and interest marks for the prompt. Genre weights are not stored here."""
+        user_id = self._positive_id(user_id, "user_id")
+        limit = max(1, min(20, int(limit)))
+        rows = self.db.execute("""
+            SELECT id, user_id, source, job_id, created_at, pair_rating, pair_skipped, feedback_at
+            FROM recommendation_picks
+            WHERE user_id=? AND (pair_rating IS NOT NULL OR pair_skipped=1
+                                 OR id IN (SELECT pick_id FROM recommendation_pick_items WHERE interested=1))
+            ORDER BY COALESCE(feedback_at, created_at) DESC, id DESC LIMIT ?
+        """, (user_id, limit)).fetchall()
+        result = []
+        for pick in self._load_picks(rows):
+            result.append({
+                "source": pick["source"], "pair_rating": pick["pair_rating"],
+                "pair_skipped": pick["pair_skipped"],
+                "interested_titles": [item["title"] for item in pick["items"] if item["interested"]],
+                "interested_ids": [item["shikimori_anime_id"] for item in pick["items"] if item["interested"]],
+            })
+        return result
+
+    def save_recommendation_feedback(self, user_id, source, pick_id, *, pair_rating=None,
+                                     skipped=False, interested_ids=None, now=None):
+        """Record pair feedback. This does not write genre weights."""
+        user_id = self._positive_id(user_id, "user_id")
+        source = self._recommendation_source(source)
+        pick = self.recommendation_pick(user_id, pick_id)
+        if not pick or pick["source"] != source:
+            return None
+        if skipped and pair_rating is not None:
+            raise ValueError("Choose a rating or a skip")
+        if pair_rating is not None and not 1 <= int(pair_rating) <= 10:
+            raise ValueError("Pair rating must be from 1 to 10")
+        moment = self._now(now)
+        chosen = None
+        if interested_ids is not None:
+            allowed = {item["shikimori_anime_id"] for item in pick["items"]}
+            chosen = []
+            for value in interested_ids:
+                text = str(value).strip()
+                if text not in allowed or text in chosen:
+                    raise ValueError("Unknown recommendation title")
+                chosen.append(text)
+        with self.db:
+            if skipped:
+                self.db.execute("""
+                    UPDATE recommendation_picks
+                    SET pair_skipped=1, pair_rating=NULL, feedback_at=?
+                    WHERE id=? AND user_id=? AND source=?
+                """, (moment, pick["id"], user_id, source))
+            elif pair_rating is not None:
+                self.db.execute("""
+                    UPDATE recommendation_picks
+                    SET pair_skipped=0, pair_rating=?, feedback_at=?
+                    WHERE id=? AND user_id=? AND source=?
+                """, (int(pair_rating), moment, pick["id"], user_id, source))
+            elif chosen is not None:
+                self.db.execute("""
+                    UPDATE recommendation_picks SET feedback_at=?
+                    WHERE id=? AND user_id=? AND source=?
+                """, (moment, pick["id"], user_id, source))
+            if chosen is not None:
+                self.db.execute("""
+                    UPDATE recommendation_pick_items SET interested=0 WHERE pick_id=?
+                """, (pick["id"],))
+                if chosen:
+                    placeholders = ", ".join("?" for _ in chosen)
+                    self.db.execute(f"""
+                        UPDATE recommendation_pick_items SET interested=1
+                        WHERE pick_id=? AND shikimori_anime_id IN ({placeholders})
+                    """, (pick["id"], *chosen))
+        return self.recommendation_pick(user_id, pick["id"])
+
+    def replace_recommendation_continuations(self, user_id, items, *, now=None):
+        user_id = self._positive_id(user_id, "user_id")
+        moment = self._now(now)
+        values, seen = [], set()
+        for item in items or ():
+            shikimori_id = str(item.get("shikimori_anime_id") or "").strip()
+            title = str(item.get("title") or "").strip()[:180]
+            after = str(item.get("after_title") or "").strip()[:180]
+            if not shikimori_id.isdigit() or not title or not after or shikimori_id in seen:
+                continue
+            seen.add(shikimori_id)
+            series_id = item.get("anime365_series_id")
+            try:
+                series_id = int(series_id) if series_id else None
+            except (TypeError, ValueError):
+                series_id = None
+            values.append((user_id, shikimori_id, str(item.get("mal_id") or "").strip() or None,
+                           series_id, title, str(item.get("year") or "").strip()[:32] or None,
+                           str(item.get("kind") or "").strip()[:32] or None,
+                           str(item.get("poster_url") or "").strip()[:1000] or None,
+                           after, str(item.get("after_shikimori_anime_id") or "").strip()[:32], moment))
+        with self.db:
+            self.db.execute("DELETE FROM recommendation_continuations WHERE user_id=?", (user_id,))
+            self.db.executemany("""
+                INSERT INTO recommendation_continuations(
+                    user_id, shikimori_anime_id, mal_id, anime365_series_id, title, year, kind,
+                    poster_url, after_title, after_shikimori_anime_id, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, values)
+            self.db.execute("""
+                INSERT INTO recommendation_continuation_state(user_id, updated_at) VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET updated_at=excluded.updated_at
+            """, (user_id, moment))
         return len(values)
 
-    def recommendations(self, user_id, *, limit=36, offset=0):
+    def recommendation_continuations(self, user_id):
         user_id = self._positive_id(user_id, "user_id")
-        limit = max(1, min(50, int(limit)))
-        offset = max(0, int(offset))
         rows = self.db.execute("""
-            SELECT anime365_series_id, shikimori_anime_id, rank, score, title, year,
-                   series_type, poster_url, reason, generated_at
-            FROM recommendation_items
-            WHERE user_id=? ORDER BY rank LIMIT ? OFFSET ?
-        """, (user_id, limit, offset)).fetchall()
-        keys = ("anime365_series_id", "shikimori_anime_id", "rank", "score", "title", "year",
-                "series_type", "poster_url", "reason", "generated_at")
+            SELECT shikimori_anime_id, mal_id, anime365_series_id, title, year, kind, poster_url,
+                   after_title, after_shikimori_anime_id, updated_at
+            FROM recommendation_continuations WHERE user_id=?
+            ORDER BY year DESC, title COLLATE NOCASE
+        """, (user_id,)).fetchall()
+        keys = ("shikimori_anime_id", "mal_id", "anime365_series_id", "title", "year", "kind",
+                "poster_url", "after_title", "after_shikimori_anime_id", "updated_at")
         return [dict(zip(keys, row)) for row in rows]
 
-    def recommendation_state(self, user_id):
+    def recommendation_continuations_updated_at(self, user_id):
         user_id = self._positive_id(user_id, "user_id")
-        connected = self.external_account_status(user_id, "shikimori")["connected"]
         row = self.db.execute("""
-            SELECT COUNT(*) FROM external_user_rates
-            WHERE user_id=? AND provider='shikimori' AND status='completed'
-              AND score BETWEEN 1 AND 10
+            SELECT updated_at FROM recommendation_continuation_state WHERE user_id=?
         """, (user_id,)).fetchone()
-        latest = self.db.execute("""
-            SELECT MAX(generated_at) FROM recommendation_items WHERE user_id=?
-        """, (user_id,)).fetchone()
-        return {"connected": connected, "rated_completed": int(row[0]),
-                "generated_at": latest[0] if latest else None}
+        return float(row[0]) if row else None
 
     # Existing global bot settings API. Telegram's polling offset remains global.
     def get(self, name, default=""):

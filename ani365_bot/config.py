@@ -30,7 +30,14 @@ class Config:
     hentai_url: str = ""
     hentai_token: str = ""
     mal_client_id: str = ""
-    recommender_secret: str = ""
+    openai_api_key: str = ""
+    openai_model: str = "gpt-6-luna"
+    openai_reasoning_effort: str = "none"
+    xai_api_key: str = ""
+    xai_model: str = "grok-4.3"
+    xai_reasoning_effort: str = "none"
+    recommendation_daily_limit: int = 5
+    recommendation_candidate_limit: int = 36
 
     @classmethod
     def from_env(cls):
@@ -67,10 +74,21 @@ class Config:
         mal_client_id = os.environ.get("MAL_CLIENT_ID", "").strip()
         if len(mal_client_id) > 512 or any(char.isspace() for char in mal_client_id):
             raise ConfigError("MAL_CLIENT_ID must be a single client identifier")
-        recommender_secret = os.environ.get("RECOMMENDER_SHARED_SECRET", "").strip()
-        if recommender_secret and (len(recommender_secret) < 32 or len(recommender_secret) > 512
-                                  or any(char.isspace() for char in recommender_secret)):
-            raise ConfigError("RECOMMENDER_SHARED_SECRET must contain 32 to 512 non-space characters")
+        openai_api_key = _optional_secret("OPENAI_API_KEY")
+        xai_api_key = _optional_secret("XAI_API_KEY")
+        openai_model = _model_id("OPENAI_MODEL", "gpt-6-luna")
+        xai_model = _model_id("XAI_MODEL", "grok-4.3")
+        openai_reasoning_effort = _reasoning_effort("OPENAI_REASONING_EFFORT")
+        xai_reasoning_effort = _reasoning_effort("XAI_REASONING_EFFORT")
+        try:
+            recommendation_daily_limit = int(os.environ.get("RECOMMENDATION_DAILY_LIMIT", "5"))
+            recommendation_candidate_limit = int(os.environ.get("RECOMMENDATION_CANDIDATE_LIMIT", "36"))
+        except ValueError:
+            raise ConfigError("RECOMMENDATION_DAILY_LIMIT and RECOMMENDATION_CANDIDATE_LIMIT must be integers") from None
+        if not 1 <= recommendation_daily_limit <= 50:
+            raise ConfigError("RECOMMENDATION_DAILY_LIMIT must be from 1 to 50")
+        if not 10 <= recommendation_candidate_limit <= 40:
+            raise ConfigError("RECOMMENDATION_CANDIDATE_LIMIT must be from 10 to 40")
         telegram_url = os.environ.get("TELEGRAM_BOT_API_URL", cls.telegram_url).rstrip("/")
         telegram = urlsplit(telegram_url)
         if (telegram.scheme not in ("http", "https") or not telegram.hostname or telegram.username
@@ -128,4 +146,32 @@ class Config:
                    mini_app_url, cookie_secure in ("1", "true", "yes"), completion_threshold,
                    download_workers, download_ttl, shikimori_id, shikimori_secret, shikimori_redirect,
                    shikimori_import_interval, anime_token, hentai_url, hentai_token, mal_client_id,
-                   recommender_secret)
+                   openai_api_key, openai_model, openai_reasoning_effort, xai_api_key, xai_model,
+                   xai_reasoning_effort, recommendation_daily_limit, recommendation_candidate_limit)
+
+
+def _optional_secret(name):
+    value = os.environ.get(name, "").strip()
+    if len(value) > 4096 or any(char.isspace() for char in value):
+        raise ConfigError(f"{name} must be a single token")
+    return value
+
+
+def _model_id(name, default):
+    raw = os.environ.get(name)
+    value = default if raw is None or not raw.strip() else raw.strip()
+    if not value or len(value) > 128 or any(char.isspace() for char in value):
+        raise ConfigError(f"{name} must be a single model id")
+    return value
+
+
+def _reasoning_effort(name):
+    raw = os.environ.get(name)
+    if raw is None:
+        return "none"
+    value = raw.strip().lower()
+    if value in ("", "off", "omit"):
+        return ""
+    if value not in {"none", "low", "medium", "high", "xhigh", "max"}:
+        raise ConfigError(f"{name} must be none, low, medium, high, xhigh, max, or empty")
+    return value

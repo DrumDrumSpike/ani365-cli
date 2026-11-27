@@ -256,24 +256,35 @@ class StoreTests(unittest.TestCase):
         profile = self.store.recommendation_profile(1)
         self.assertNotIn("access", repr(profile))
         self.assertEqual({item["external_anime_id"] for item in profile["rates"]}, {"501", "502"})
-        self.assertEqual(self.store.recommendation_state(1)["rated_completed"], 1)
-        self.assertEqual(self.store.replace_recommendations(1, [{
-            "anime365_series_id": 55, "shikimori_anime_id": "900", "score": 42.5,
-            "title": "Recommended", "year": 2024, "series_type": "TV",
-            "poster_url": "https://anime.example/posters/55.jpg", "reason": "Genres match",
-        }], generated_at=20), 1)
-        self.assertEqual(self.store.recommendations(1)[0]["title"], "Recommended")
-        self.assertEqual(self.store.replace_recommendations(1, [], generated_at=21), 0)
-        self.assertEqual(self.store.recommendations(1), [])
-        self.assertEqual(self.store.recommendations(2), [])
+        self.assertIsNone(self.store.external_user_rate(2, "shikimori", "101"))
 
-    def test_v12_schema_has_score_and_recommendation_items(self):
+    def test_v15_schema_replaces_weekly_recommendation_feed(self):
         columns = {row[1] for row in self.store.db.execute("PRAGMA table_info(external_user_rates)")}
         self.assertIn("score", columns)
+        self.store.close()
+        db = sqlite3.connect(self.directory / "bot.sqlite3")
+        db.execute("PRAGMA user_version = 14")
+        db.execute("""
+            CREATE TABLE recommendation_items (
+                user_id INTEGER NOT NULL, anime365_series_id INTEGER NOT NULL,
+                shikimori_anime_id TEXT NOT NULL, rank INTEGER NOT NULL, score REAL NOT NULL,
+                title TEXT NOT NULL, year TEXT, series_type TEXT, poster_url TEXT,
+                reason TEXT NOT NULL, generated_at REAL NOT NULL,
+                PRIMARY KEY(user_id, anime365_series_id)
+            )
+        """)
+        db.execute("""
+            INSERT INTO recommendation_items VALUES (1, 5, '9', 1, 1, 'Old feed', NULL, NULL, NULL, 'because', 1)
+        """)
+        db.commit()
+        db.close()
+        self.store = Store(self.directory)
         tables = {row[0] for row in self.store.db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        )}
-        self.assertIn("recommendation_items", tables)
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertNotIn("recommendation_items", tables)
+        self.assertIn("recommendation_picks", tables)
+        self.assertIn("recommendation_jobs", tables)
+        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
 
     def test_confirmed_external_ids_can_be_read_for_shared_metadata_cache(self):
         self.store.save_external_id(10, "mal", "501")

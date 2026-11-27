@@ -1,8 +1,10 @@
 *
 !ani365_bot/
 !ani365_bot/*.py
-!ani365_recommender/
-!ani365_recommender/*.py
+!ani365_bot/web_static/
+!ani365_bot/web_static/**
+!ani365_bot/recommendations/
+!ani365_bot/recommendations/**
 !requirements.txt
 !ani365-cli-master/
 !ani365-cli-master/LICENSE
