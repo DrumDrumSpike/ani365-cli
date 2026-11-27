@@ -432,34 +432,6 @@
       if (data.refreshing) seasonalTimer = setTimeout(() => { if (state.view === 'seasonal') seasonal(); }, 5000);
     } catch(error) { if (state.view === 'seasonal') fail(error); }
   }
-  async function recommendations(offset = 0, accumulated = []) {
-    try {
-      state.view = 'recommendations';
-      const data = await api(`/api/recommendations?offset=${encodeURIComponent(offset)}`);
-      const items = [...accumulated, ...(data.items || [])];
-      const updated = data.generated_at ? new Date(Number(data.generated_at) * 1000).toLocaleString('ru-RU') : '';
-      let content;
-      if (!data.connected) content = '<p class="empty">Подключите Shikimori в настройках, чтобы получать персональные рекомендации.</p>';
-      else if ((data.rated_completed || 0) < 5) content = `<p class="empty">Поставьте оценки хотя бы пяти просмотренным тайтлам в Shikimori. Сейчас: ${esc(data.rated_completed || 0)}.</p>`;
-      else if (!items.length) content = '<p class="empty">Лента готовится. Она обновляется раз в неделю после импорта Shikimori.</p>';
-      else content = `${recommendationCards(items)}${data.next_offset !== null ? '<button class="action secondary" id="more-recommendations">Показать ещё</button>' : ''}`;
-      root.innerHTML = `<section class="page-heading"><p class="eyebrow">Для вас</p><h1>Рекомендации</h1><p class="meta">${updated ? `Обновлено: ${esc(updated)}.` : 'На основе оценок и жанров Shikimori.'}</p></section>${content}<button class="action secondary back">Назад</button>`;
-      useBack(); root.querySelector('.back').onclick = more;
-      const more = root.querySelector('#more-recommendations');
-      if (more) more.onclick = () => recommendations(data.next_offset, items);
-      root.querySelectorAll('[data-recommendation]').forEach(button => button.onclick = async () => {
-        try {
-          const item = items.find(row => Number(row.anime365_series_id) === Number(button.dataset.recommendation));
-          if (!item) throw new Error('Рекомендация больше недоступна.');
-          await api('/api/library', {method:'POST', body:JSON.stringify({
-            series_id:item.anime365_series_id, title:item.title, year:item.year == null ? null : String(item.year),
-            series_type:item.series_type, provider:'anime365',
-          })});
-          await details(item.anime365_series_id);
-        } catch(error) { fail(error); }
-      });
-    } catch(error) { fail(error); }
-  }
   async function search(provider = 'anime365') {
     if (provider === 'hentai365' && !state.adultCatalog) return more();
     state.view = provider === 'hentai365' ? 'hentai' : 'search';
