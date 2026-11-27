@@ -294,7 +294,114 @@
     } catch (error) { fail(error); }
   }
   function recommendationCards(items) {
-    return `<section class="grid">${items.map(item => `<article class="card"><button data-recommendation="${esc(item.anime365_series_id)}">${item.poster_url ? `<img class="poster" src="${esc(item.poster_url)}" alt="" loading="lazy">` : '<div class="poster catalog-placeholder">Anime365</div>'}<strong>${esc(item.title)}</strong><div class="meta">${esc(item.year || 'Год не указан')}${item.series_type ? ` · ${esc(item.series_type)}` : ''}</div><p class="recommendation-reason">${esc(item.reason)}</p></button></article>`).join('')}</section>`;
+    return `<section class="grid">${items.map(item => {
+      const body = `${item.poster_url ? `<img class="poster" src="${esc(item.poster_url)}" alt="" loading="lazy">` : '<div class="poster catalog-placeholder">Anime365</div>'}<strong>${esc(item.title)}</strong><div class="meta">${esc(item.year || 'Год не указан')}${item.kind || item.series_type ? ` · ${esc(item.kind || item.series_type)}` : ''}</div>${item.reason ? `<p class="recommendation-reason">${esc(item.reason)}</p>` : ''}${item.anime365_series_id ? '' : '<p class="meta">Нет карточки Anime365</p>'}`;
+      return item.anime365_series_id ? `<article class="card"><button data-recommendation="${esc(item.anime365_series_id)}">${body}</button></article>` : `<article class="card">${body}</article>`;
+    }).join('')}</section>`;
+  }
+  let recommendationTimer;
+  function openRecommendation(items, seriesId) {
+    const item = items.find(row => Number(row.anime365_series_id) === Number(seriesId));
+    if (!item || !item.anime365_series_id) throw new Error('Карточка Anime365 для этого тайтла не найдена.');
+    return api('/api/library', {method:'POST', body:JSON.stringify({
+      series_id:item.anime365_series_id, title:item.title, year:item.year == null ? null : String(item.year),
+      series_type:item.kind || item.series_type || null, provider:'anime365',
+    })}).then(() => details(item.anime365_series_id));
+  }
+  async function recommendationHistory(source) {
+    try {
+      state.view = 'recommendations';
+      const data = await api(`/api/recommendations/history?source=${encodeURIComponent(source)}`);
+      const blocks = (data.items || []).map(pick => {
+        const when = new Date(pick.created_at * 1000).toLocaleString('ru-RU');
+        const verdict = pick.pair_skipped ? 'Пропущено' : pick.pair_rating ? `Оценка пары: ${pick.pair_rating}` : 'Без отзыва';
+        const liked = (pick.items || []).filter(item => item.interested).map(item => item.title);
+        const body = pick.items && pick.items.length ? recommendationCards(pick.items) : '<p class="empty">В этой подборке не было тайтлов.</p>';
+        return `<section class="panel"><p class="meta">${esc(when)} · ${esc(verdict)}${liked.length ? ` · Интересно: ${esc(liked.join(', '))}` : ''}</p>${body}</section>`;
+      }).join('');
+      root.innerHTML = `<section class="page-heading"><p class="eyebrow">${esc(source === 'xai' ? 'Grok' : 'ChatGPT')}</p><h1>История подборок</h1></section>${blocks || '<p class="empty">Пока нет прошлых подборок.</p>'}<button class="action secondary back">Назад</button>`;
+      useBack(); root.querySelector('.back').onclick = () => recommendations(source);
+      root.querySelectorAll('[data-recommendation]').forEach(button => button.onclick = async () => {
+        try { await openRecommendation((data.items || []).flatMap(pick => pick.items || []), button.dataset.recommendation); }
+        catch (error) { fail(error); }
+      });
+    } catch (error) { fail(error); }
+  }
+  async function recommendations(preferredSource) {
+    clearTimeout(recommendationTimer);
+    try {
+      state.view = 'recommendations';
+      const data = await api('/api/recommendations');
+      if (state.view !== 'recommendations') return;
+      if (!data.shikimori_connected) {
+        root.innerHTML = `<section class="page-heading"><p class="eyebrow">Для вас</p><h1>Рекомендации</h1><p class="meta">Подбор опирается на ваш список и оценки Shikimori.</p></section><section class="panel"><p>Сначала подключите Shikimori.</p>${data.shikimori_configured ? '<button class="action" id="connect-shikimori">Подключить Shikimori</button>' : '<p class="meta">OAuth Shikimori ещё не настроен на сервере.</p>'}</section><button class="action secondary back">Назад</button>`;
+        useBack(); root.querySelector('.back').onclick = more;
+        const connect = root.querySelector('#connect-shikimori');
+        if (connect) connect.onclick = async () => { try { const result = await api('/api/shikimori/connect', {method:'POST'}); location.href = result.authorization_url; } catch (error) { fail(error); } };
+        return;
+      }
+      const source = data.sources[preferredSource] ? preferredSource : (state.recommendationSource || 'openai');
+      state.recommendationSource = source;
+      const current = data.sources[source];
+      const job = current.job;
+      const pick = current.pick;
+      const active = job && (job.state === 'queued' || job.state === 'running');
+      const statusText = !job ? '' : job.state === 'queued' ? 'Подбор в очереди. Можно закрыть приложение — запрос не продублируется.' : job.state === 'running' ? 'Подбираем аниме. Прошлая подборка остаётся на экране.' : job.state === 'failed' ? job.error_message || 'Не удалось подобрать аниме.' : '';
+      const remaining = Math.max(0, Number(current.daily_limit) - Number(current.daily_used));
+      const continuations = data.continuations || [];
+      const continuationBlock = continuations.length ? `<section class="panel"><h2>Вышло продолжение</h2><p class="meta">Следующий сезон того, что вы уже смотрели. Это не занимает место в подборке.</p>${recommendationCards(continuations.map(item => ({...item, reason: item.after_title ? `После «${item.after_title}»` : ''})) )}</section>` : '';
+      let pickBlock = '';
+      if (pick && pick.items && pick.items.length) {
+        const saved = pick.pair_skipped ? 'Пара пропущена.' : pick.pair_rating ? `Ваша оценка пары: ${pick.pair_rating}.` : '';
+        pickBlock = `${recommendationCards(pick.items)}<section class="panel"><h2>Как вам пара?</h2><p class="meta">Оценка пары не меняет веса жанров. Она только передаётся в следующий запрос. Отметьте, что хочется посмотреть.</p><div class="score-row" id="pair-scores">${[1,2,3,4,5,6,7,8,9,10].map(score => `<button type="button" data-score="${score}" class="${pick.pair_rating === score ? 'selected' : ''}">${score}</button>`).join('')}</div><button class="action secondary" id="skip-pair">Пропустить</button><div>${pick.items.map(item => `<label><input type="checkbox" data-interest="${esc(item.shikimori_anime_id)}" ${item.interested ? 'checked' : ''}> ${esc(item.title)}</label><br>`).join('')}</div><button class="action" id="save-feedback">Сохранить отзыв</button><p class="meta" id="feedback-state">${esc(saved)}</p></section>`;
+      } else if (pick) {
+        pickBlock = '<p class="empty">Сейчас нет тайтла, который хорошо подходит. Можно попробовать позже или другой источник.</p>';
+      } else if (!active) {
+        pickBlock = '<p class="empty">Нажмите «Подобрать аниме». Пришлём не больше двух тайтлов и коротко объясним, почему они могут вам зайти.</p>';
+      }
+      root.innerHTML = `<section class="page-heading"><p class="eyebrow">Для вас</p><h1>Рекомендации</h1><p class="meta">Оценки сравниваются с вашей обычной шкалой. «Брошено» учитывается отдельно и не штрафует жанры.</p></section><div class="source-switch"><button class="action ${source === 'openai' ? '' : 'secondary'}" data-source="openai">ChatGPT</button><button class="action ${source === 'xai' ? '' : 'secondary'}" data-source="xai">Grok</button></div><p class="meta">Сегодня осталось ${esc(remaining)} из ${esc(current.daily_limit)} для ${esc(current.label)}.</p>${current.configured ? '' : '<p class="meta">Ключ этого источника не настроен на сервере.</p>'}<button class="action" id="recommend">${active ? 'Обновить статус' : 'Подобрать аниме'}</button><p class="${job && job.state === 'failed' ? 'error' : 'meta'}" id="recommendation-error">${esc(statusText)}</p>${continuationBlock}${pickBlock}<button class="action secondary" id="recommendation-history">История</button><button class="action secondary back">Назад</button>`;
+      useBack(); root.querySelector('.back').onclick = more;
+      root.querySelectorAll('[data-source]').forEach(button => button.onclick = () => recommendations(button.dataset.source));
+      root.querySelector('#recommend').onclick = async () => {
+        const button = root.querySelector('#recommend');
+        try {
+          button.disabled = true;
+          await api(`/api/recommendations/${source}`, {method:'POST'});
+          await recommendations(source);
+        } catch (error) {
+          const slot = root.querySelector('#recommendation-error');
+          if (slot && state.view === 'recommendations') { slot.className = 'error'; slot.textContent = error.message; button.disabled = false; }
+          else fail(error);
+        }
+      };
+      root.querySelector('#recommendation-history').onclick = () => recommendationHistory(source);
+      const cards = [...(pick && pick.items || []), ...continuations];
+      root.querySelectorAll('[data-recommendation]').forEach(button => button.onclick = async () => {
+        try { await openRecommendation(cards, button.dataset.recommendation); }
+        catch (error) { fail(error); }
+      });
+      const save = root.querySelector('#save-feedback');
+      if (save && pick) {
+        let selected = pick.pair_rating || null;
+        root.querySelectorAll('[data-score]').forEach(button => button.onclick = () => {
+          selected = Number(button.dataset.score);
+          root.querySelectorAll('[data-score]').forEach(item => item.classList.toggle('selected', Number(item.dataset.score) === selected));
+        });
+        const send = async skip => {
+          const interested = [...root.querySelectorAll('[data-interest]:checked')].map(item => item.dataset.interest);
+          const body = {pick_id: pick.id, skip, interested_ids: interested};
+          if (!skip) {
+            if (!selected) { root.querySelector('#feedback-state').textContent = 'Выберите оценку от 1 до 10 или пропуск.'; return; }
+            body.pair_rating = selected;
+          }
+          await api(`/api/recommendations/${source}/feedback`, {method:'POST', body:JSON.stringify(body)});
+          await recommendations(source);
+        };
+        save.onclick = async () => { try { await send(false); } catch (error) { fail(error); } };
+        root.querySelector('#skip-pair').onclick = async () => { try { await send(true); } catch (error) { fail(error); } };
+      }
+      if (active || data.continuations_refreshing) recommendationTimer = setTimeout(() => { if (state.view === 'recommendations') recommendations(source); }, 3000);
+    } catch (error) { if (state.view === 'recommendations') fail(error); }
   }
   let seasonalTimer;
   async function seasonal() {

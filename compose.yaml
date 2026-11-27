@@ -43,6 +43,8 @@ services:
       DATA_DIR: /data
       MEDIA_DIR: /jobs
       TELEGRAM_BOT_API_URL: http://telegram-bot-api:8081
+      OPENAI_API_KEY: ""
+      XAI_API_KEY: ""
     depends_on:
       media-init:
         condition: service_completed_successfully
@@ -77,6 +79,15 @@ services:
     environment:
       DATA_DIR: /data
       MEDIA_DIR: /jobs
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-6.2-sol}
+      OPENAI_REASONING_EFFORT: ${OPENAI_REASONING_EFFORT:-medium}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      XAI_MODEL: ${XAI_MODEL:-grok-4.7}
+      XAI_REASONING_EFFORT: ${XAI_REASONING_EFFORT:-medium}
+      RECOMMENDATION_DAILY_LIMIT: ${RECOMMENDATION_DAILY_LIMIT:-5}
+      RECOMMENDATION_CANDIDATE_LIMIT: ${RECOMMENDATION_CANDIDATE_LIMIT:-36}
+      RECOMMENDATION_LLM_TIMEOUT: ${RECOMMENDATION_LLM_TIMEOUT:-180}
     depends_on:
       bot:
         condition: service_healthy
@@ -101,34 +112,6 @@ services:
       timeout: 5s
       start_period: 20s
       retries: 3
-    logging:
-      driver: json-file
-      options:
-        max-size: 5m
-        max-file: "3"
-
-  recommender:
-    image: ${BOT_IMAGE:-ani365-bot:local}
-    build: .
-    command: ["python", "-m", "ani365_recommender.main"]
-    profiles: ["recommendations"]
-    environment:
-      MAIN_API_URL: http://web:8000
-      RECOMMENDER_SHARED_SECRET: ${RECOMMENDER_SHARED_SECRET:-}
-    depends_on:
-      web:
-        condition: service_healthy
-    restart: "no"
-    init: true
-    read_only: true
-    tmpfs:
-      - /tmp:size=16m,mode=1777
-    cap_drop: [ALL]
-    security_opt:
-      - no-new-privileges:true
-    mem_limit: 256m
-    cpus: 0.5
-    pids_limit: 64
     logging:
       driver: json-file
       options:

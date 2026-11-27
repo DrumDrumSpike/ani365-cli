@@ -19,6 +19,8 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install -r requirements.txt
+      - name: Install ffmpeg for SRT subtitle conversion
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: python -m unittest discover -s tests -v
       - run: bash -n scripts/update.sh
       - name: Validate Compose with placeholder credentials

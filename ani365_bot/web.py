@@ -35,6 +35,10 @@ from .shikimori import Shikimori, ShikimoriError
 from .seasonal import SeasonalCatalog
 from .translations import group_translations, viewing_type
 from .subtitle_fonts import subtitle_fonts
+from .recommendations import SOURCE_LABELS, SOURCES, RecommendationService
+from .recommendations.catalog import ShikimoriCatalog
+from .recommendations.llm import ChatCompletionsClient
+from .recommendations.service import RecommendationRequestError
 
 
 LOG = logging.getLogger(__name__)
@@ -325,28 +329,11 @@ class ShikimoriStatusRequest(BaseModel):
     status: str = Field(pattern="^(planned|watching|rewatching|completed|on_hold|dropped)$")
 
 
-class RecommendationCandidateRequest(BaseModel):
-    shikimori_anime_id: str = Field(min_length=1, max_length=32, pattern="^[0-9]+$")
-    mal_id: str | None = Field(default=None, max_length=32, pattern="^[0-9]+$")
-
-
-class RecommendationCandidateResolveRequest(BaseModel):
-    items: list[RecommendationCandidateRequest] = Field(min_length=1, max_length=100)
-
-
-class RecommendationItemRequest(BaseModel):
-    anime365_series_id: int = Field(gt=0)
-    shikimori_anime_id: str = Field(min_length=1, max_length=32, pattern="^[0-9]+$")
-    score: float = Field(ge=-100000, le=100000)
-    title: str = Field(min_length=1, max_length=500)
-    year: str | int | None = None
-    series_type: str | None = Field(default=None, max_length=64)
-    poster_url: str | None = Field(default=None, max_length=1000)
-    reason: str = Field(min_length=1, max_length=300)
-
-
-class RecommendationReplaceRequest(BaseModel):
-    items: list[RecommendationItemRequest] = Field(max_length=50)
+class RecommendationFeedbackRequest(BaseModel):
+    pick_id: int = Field(gt=0)
+    pair_rating: int | None = Field(default=None, ge=1, le=10)
+    skip: bool = False
+    interested_ids: list[str] | None = Field(default=None, max_length=2)
 
 
 def _api_error(exc):
@@ -582,6 +569,22 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
     app.state.proxy_transport = proxy_transport
     app.state.shikimori = Shikimori(config.shikimori_client_id, config.shikimori_client_secret,
                                     config.shikimori_redirect_uri)
+    app.state.recommendations = RecommendationService(
+        store, anime, ShikimoriCatalog(), {
+            "openai": ChatCompletionsClient(
+                source="openai", api_key=config.openai_api_key, model=config.openai_model,
+                url="https://api.openai.com/v1/chat/completions",
+                reasoning_effort=config.openai_reasoning_effort,
+                timeout=config.recommendation_llm_timeout),
+            "xai": ChatCompletionsClient(
+                source="xai", api_key=config.xai_api_key, model=config.xai_model,
+                url="https://api.x.ai/v1/chat/completions",
+                reasoning_effort=config.xai_reasoning_effort,
+                timeout=config.recommendation_llm_timeout),
+        }, daily_limit=config.recommendation_daily_limit,
+        candidate_limit=config.recommendation_candidate_limit, anime_url=config.anime_url)
+    app.state.recommendation_tasks = {}
+    app.state.continuation_tasks = {}
     app.state.seasonal = SeasonalCatalog(store, app.state.shikimori, anime)
     app.state.seasonal_task = None
     app.state.shikimori_metadata_refresh_after = {}
@@ -610,16 +613,6 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
         if not store.is_allowed(user_id, config.owner_id):
             raise HTTPException(403, "Mini App access is not allowed.")
         return user_id
-
-    async def require_recommender(
-            token: str | None = Header(default=None, alias="X-Recommender-Token")):
-        """Authenticate the co-located batch worker without exposing SQLite."""
-        secret = str(config.recommender_secret or "")
-        if not secret or token is None or not hmac.compare_digest(secret, token):
-            # The endpoints are not part of the public API; do not reveal if a
-            # recommender has been configured to an unauthenticated caller.
-            raise HTTPException(404, "Not found")
-        return True
 
     def require_token(user_id):
         token = config.anime_token
@@ -995,6 +988,99 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
         app.state.shikimori_import_tasks[user_id] = task
         task.add_done_callback(lambda _: app.state.shikimori_import_tasks.pop(user_id, None))
 
+    async def refresh_recommendation_rates(user_id):
+        """Update scores and statuses without a per-title metadata crawl."""
+        try:
+            account = await shikimori_account(user_id)
+            upstream = await app.state.shikimori.user_rates(
+                account["access_token"], account["external_user_id"])
+        except (ShikimoriError, HTTPException, ValueError):
+            return False
+        external_ids = []
+        for row in upstream:
+            target = row.get("target") if isinstance(row.get("target"), dict) else {}
+            external_ids.append(str(row.get("target_id") or target.get("id") or ""))
+        cached = store.external_anime_metadata_many("shikimori", external_ids)
+        rates = _shikimori_rates(upstream, SHIKIMORI_STATUSES, metadata_by_id=cached)
+        existing = {row["external_rate_id"]: row
+                    for row in store.external_user_rates(user_id, "shikimori", limit=5000)}
+        for rate in rates:
+            previous = existing.get(rate["external_rate_id"])
+            if previous and rate["title"].startswith("Shikimori #") and not previous["title"].startswith("Shikimori #"):
+                rate["title"] = previous["title"]
+        persist_shikimori_rates(user_id, rates)
+        return True
+
+    app.state.recommendations.refresh_rates = refresh_recommendation_rates
+
+    def schedule_recommendation(job_id):
+        current = app.state.recommendation_tasks.get(job_id)
+        if current and not current.done():
+            return current
+        task = asyncio.create_task(app.state.recommendations.execute(job_id))
+        app.state.recommendation_tasks[job_id] = task
+        task.add_done_callback(lambda _: app.state.recommendation_tasks.pop(job_id, None))
+        return task
+
+    def schedule_continuation_refresh(user_id):
+        current = app.state.continuation_tasks.get(user_id)
+        if current and not current.done():
+            return current
+
+        async def worker():
+            try:
+                await app.state.recommendations.refresh_continuations(user_id)
+            except Exception:
+                LOG.info("Continuation refresh deferred (user=%s)", user_id)
+
+        task = asyncio.create_task(worker())
+        app.state.continuation_tasks[user_id] = task
+        task.add_done_callback(lambda _: app.state.continuation_tasks.pop(user_id, None))
+        return task
+
+    def public_recommendation_job(job):
+        if not job:
+            return None
+        return {"id": job["id"], "source": job["source"], "state": job["state"],
+                "requested_at": job["requested_at"], "finished_at": job["finished_at"],
+                "error_code": job["error_code"], "error_message": job["error_message"]}
+
+    def public_recommendation_pick(pick):
+        if not pick:
+            return None
+        return {"id": pick["id"], "source": pick["source"], "created_at": pick["created_at"],
+                "pair_rating": pick["pair_rating"], "pair_skipped": pick["pair_skipped"],
+                "feedback_at": pick["feedback_at"], "items": [
+                    {"shikimori_anime_id": item["shikimori_anime_id"], "mal_id": item["mal_id"],
+                     "anime365_series_id": item["anime365_series_id"], "title": item["title"],
+                     "year": item["year"], "kind": item["kind"], "genres": item["genres"],
+                     "poster_url": item["poster_url"], "reason": item["reason"],
+                     "interested": item["interested"]}
+                    for item in pick["items"]]}
+
+    def recommendation_view(user_id):
+        connected = store.external_account_status(user_id, "shikimori")["connected"]
+        since = time.time() - 24 * 60 * 60
+        sources = {}
+        for source in SOURCES:
+            job = store.latest_recommendation_job(user_id, source)
+            pick = store.latest_recommendation_pick(user_id, source)
+            sources[source] = {
+                "id": source,
+                "label": SOURCE_LABELS[source],
+                "configured": app.state.recommendations.clients[source].configured(),
+                "daily_limit": app.state.recommendations.daily_limit,
+                "daily_used": store.recommendation_api_calls_since(user_id, source, since),
+                "job": public_recommendation_job(job),
+                "pick": public_recommendation_pick(pick),
+            }
+        refreshing = app.state.continuation_tasks.get(user_id)
+        return {"shikimori_connected": connected,
+                "shikimori_configured": bool(app.state.shikimori.configured),
+                "continuations": store.recommendation_continuations(user_id),
+                "continuations_refreshing": bool(refreshing and not refreshing.done()),
+                "sources": sources}
+
     @app.on_event("shutdown")
     async def shutdown():
         if app.state.seasonal_task:
@@ -1016,6 +1102,14 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
             task.cancel()
         if app.state.mal_discovery_tasks:
             await asyncio.gather(*app.state.mal_discovery_tasks.values(), return_exceptions=True)
+        for task in list(app.state.recommendation_tasks.values()):
+            task.cancel()
+        if app.state.recommendation_tasks:
+            await asyncio.gather(*app.state.recommendation_tasks.values(), return_exceptions=True)
+        for task in list(app.state.continuation_tasks.values()):
+            task.cancel()
+        if app.state.continuation_tasks:
+            await asyncio.gather(*app.state.continuation_tasks.values(), return_exceptions=True)
         await app.state.downloads.stop()
         if owns_store:
             store.close()
@@ -1025,6 +1119,8 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
         await app.state.downloads.start()
         app.state.seasonal_task = asyncio.create_task(app.state.seasonal.run())
         app.state.shikimori_scheduler_task = asyncio.create_task(shikimori_background_scheduler())
+        for job_id in app.state.recommendations.recover():
+            schedule_recommendation(job_id)
 
     @app.get("/health")
     async def health():
@@ -1056,80 +1152,6 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
         return FileResponse(config.data_dir / "subtitle-fonts" / font_name,
                             headers={"Cache-Control": "public, max-age=86400"})
 
-    @app.get("/internal/recommendations/profiles")
-    async def recommendation_profiles(_=Depends(require_recommender)):
-        """Small, credential-free input snapshot for the weekly local worker."""
-        profiles = []
-        for candidate_user_id in store.external_account_user_ids("shikimori"):
-            if not store.is_allowed(candidate_user_id, config.owner_id):
-                continue
-            profile = store.recommendation_profile(candidate_user_id)
-            if profile is not None:
-                profiles.append(profile)
-        return {"profiles": profiles}
-
-    @app.post("/internal/recommendations/resolve")
-    async def resolve_recommendation_candidates(payload: RecommendationCandidateResolveRequest,
-                                                _=Depends(require_recommender)):
-        """Keep only candidates Anime365 confirms through an exact MAL bridge."""
-        origin = urlsplit(config.anime_url)
-
-        def safe_poster(row):
-            value = row.get("posterUrlSmall") or row.get("posterUrl")
-            parts = urlsplit(value) if isinstance(value, str) else None
-            if (not parts or parts.scheme != "https" or parts.hostname != origin.hostname
-                    or parts.username or parts.password or parts.query or parts.fragment
-                    or not parts.path.startswith("/posters/")):
-                return None
-            return value
-
-        async def resolve_one(item):
-            bridges = []
-            for value in (item.mal_id, item.shikimori_anime_id):
-                if value and value not in bridges:
-                    bridges.append(value)
-            for bridge in bridges:
-                try:
-                    rows = await anime.series_by_mal_id(bridge)
-                except APIError:
-                    continue
-                if not rows:
-                    continue
-                row = rows[0]
-                try:
-                    series_id = int(row["id"])
-                except (KeyError, TypeError, ValueError):
-                    continue
-                value = {"shikimori_anime_id": item.shikimori_anime_id,
-                         "anime365_series_id": series_id, "title": title(row),
-                         "year": row.get("year"),
-                         "series_type": row.get("typeTitle") or row.get("type"),
-                         "poster_url": safe_poster(row)}
-                store.save_external_id(series_id, "shikimori", item.shikimori_anime_id)
-                store.save_external_anime_metadata(
-                    "shikimori", item.shikimori_anime_id, title=value["title"],
-                    poster_url=value["poster_url"], kind=value["series_type"], aired_on=value["year"])
-                return value
-            return None
-
-        semaphore = asyncio.Semaphore(3)
-
-        async def bounded(item):
-            async with semaphore:
-                return await resolve_one(item)
-
-        resolved = await asyncio.gather(*(bounded(item) for item in payload.items))
-        return {"items": [item for item in resolved if item is not None]}
-
-    @app.put("/internal/recommendations/{target_user_id}")
-    async def save_recommendations(target_user_id: int, payload: RecommendationReplaceRequest,
-                                   _=Depends(require_recommender)):
-        if not store.is_allowed(target_user_id, config.owner_id):
-            raise HTTPException(404, "Not found")
-        saved = store.replace_recommendations(
-            target_user_id, [item.model_dump() for item in payload.items])
-        return {"saved": saved}
-
     @app.get("/api/me")
     async def me(response: Response, user_id=Depends(authenticated_user)):
         response.set_cookie("ani365_mini_session", app.state.sessions.create(user_id),
@@ -1143,13 +1165,51 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
         return {**snapshot, "refreshing": app.state.seasonal.lock.locked()}
 
     @app.get("/api/recommendations")
-    async def recommendations(offset: int = Query(default=0, ge=0),
-                              limit: int = Query(default=12, ge=1, le=36),
-                              user_id=Depends(authenticated_user)):
-        state = store.recommendation_state(user_id)
-        items = store.recommendations(user_id, limit=limit, offset=offset)
-        return {**state, "items": items, "offset": offset,
+    async def recommendations(user_id=Depends(authenticated_user)):
+        if (store.external_account_status(user_id, "shikimori")["connected"]
+                and app.state.recommendations.continuations_stale(user_id)):
+            schedule_continuation_refresh(user_id)
+        return recommendation_view(user_id)
+
+    @app.get("/api/recommendations/history")
+    async def recommendation_history(source: str | None = None,
+                                     offset: int = Query(default=0, ge=0),
+                                     limit: int = Query(default=20, ge=1, le=50),
+                                     user_id=Depends(authenticated_user)):
+        if source is not None and source not in SOURCES:
+            raise HTTPException(422, "Неизвестный источник рекомендаций.")
+        items = store.recommendation_history(user_id, source, limit=limit, offset=offset)
+        return {"items": [public_recommendation_pick(item) for item in items], "offset": offset,
                 "next_offset": offset + len(items) if len(items) == limit else None}
+
+    @app.post("/api/recommendations/{source}", status_code=202)
+    async def request_recommendations(source: str, user_id=Depends(authenticated_user)):
+        try:
+            job, created = app.state.recommendations.request(user_id, source)
+        except RecommendationRequestError as exc:
+            raise HTTPException(exc.status, str(exc)) from None
+        if created:
+            schedule_recommendation(job["id"])
+        return {"created": created, "job": public_recommendation_job(job), **recommendation_view(user_id)}
+
+    @app.post("/api/recommendations/{source}/feedback")
+    async def recommendation_feedback(source: str, payload: RecommendationFeedbackRequest,
+                                      user_id=Depends(authenticated_user)):
+        if payload.skip and payload.pair_rating is not None:
+            raise HTTPException(422, "Выберите оценку пары или пропуск.")
+        if payload.interested_ids is not None:
+            for value in payload.interested_ids:
+                if not str(value).isdigit():
+                    raise HTTPException(422, "Некорректный отзыв.")
+        try:
+            pick = store.save_recommendation_feedback(
+                user_id, source, payload.pick_id, pair_rating=payload.pair_rating,
+                skipped=payload.skip, interested_ids=payload.interested_ids)
+        except ValueError:
+            raise HTTPException(422, "Некорректный отзыв.") from None
+        if not pick:
+            raise HTTPException(404, "Подборка не найдена.")
+        return public_recommendation_pick(pick)
 
     @app.get("/api/shikimori/status")
     async def shikimori_status(user_id=Depends(authenticated_user)):
