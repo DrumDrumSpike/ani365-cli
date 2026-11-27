@@ -8,7 +8,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 
 HENTAI_SERIES_OFFSET = 1_000_000_000_000
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 
 class StateError(ValueError):
@@ -153,6 +153,11 @@ class Store:
             with self.db:
                 self._create_v15()
                 self.db.execute("PRAGMA user_version = 15")
+            version = 15
+        if version < 16:
+            with self.db:
+                self._create_v16()
+                self.db.execute("PRAGMA user_version = 16")
 
     def seasonal_snapshot(self):
         row = self.db.execute("SELECT payload FROM seasonal_catalog WHERE id=1").fetchone()
@@ -563,6 +568,38 @@ class Store:
         self.db.execute("""
             CREATE TABLE IF NOT EXISTS recommendation_continuation_state (
                 user_id INTEGER PRIMARY KEY,
+                updated_at REAL NOT NULL
+            )
+        """)
+
+    def _create_v16(self):
+        """Remember a mood on each job and allow one active job per source and mood."""
+        job_columns = {row[1] for row in self.db.execute("PRAGMA table_info(recommendation_jobs)")}
+        if "mood_key" not in job_columns:
+            self.db.execute(
+                "ALTER TABLE recommendation_jobs ADD COLUMN mood_key TEXT NOT NULL DEFAULT 'any|'")
+        if "mood_label" not in job_columns:
+            self.db.execute(
+                "ALTER TABLE recommendation_jobs ADD COLUMN mood_label TEXT NOT NULL DEFAULT 'Любое'")
+        if "mood_json" not in job_columns:
+            self.db.execute(
+                "ALTER TABLE recommendation_jobs ADD COLUMN mood_json TEXT NOT NULL "
+                "DEFAULT '{\"chips\":[\"any\"],\"note\":\"\"}'")
+        pick_columns = {row[1] for row in self.db.execute("PRAGMA table_info(recommendation_picks)")}
+        if "mood_label" not in pick_columns:
+            self.db.execute(
+                "ALTER TABLE recommendation_picks ADD COLUMN mood_label TEXT NOT NULL DEFAULT ''")
+        self.db.execute("DROP INDEX IF EXISTS recommendation_jobs_active_idx")
+        self.db.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS recommendation_jobs_active_idx
+            ON recommendation_jobs(user_id, source, mood_key)
+            WHERE state IN ('queued', 'running')
+        """)
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS recommendation_mood_preference (
+                user_id INTEGER PRIMARY KEY,
+                chips TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
                 updated_at REAL NOT NULL
             )
         """)
@@ -1192,7 +1229,8 @@ class Store:
         if not row:
             return None
         keys = ("id", "user_id", "source", "state", "requested_at", "started_at", "finished_at",
-                "error_code", "error_message", "api_called", "attempts")
+                "error_code", "error_message", "api_called", "attempts", "mood_key", "mood_label",
+                "mood_json")
         job = dict(zip(keys, row))
         job["api_called"] = bool(job["api_called"])
         return job
@@ -1200,21 +1238,26 @@ class Store:
     def recommendation_job(self, job_id):
         row = self.db.execute("""
             SELECT id, user_id, source, state, requested_at, started_at, finished_at,
-                   error_code, error_message, api_called, attempts
+                   error_code, error_message, api_called, attempts, mood_key, mood_label, mood_json
             FROM recommendation_jobs WHERE id=?
         """, (int(job_id),)).fetchone()
         return self._recommendation_job(row)
 
-    def active_recommendation_job(self, user_id, source):
+    def active_recommendation_job(self, user_id, source, mood_key=None):
         user_id = self._positive_id(user_id, "user_id")
         source = self._recommendation_source(source)
-        row = self.db.execute("""
+        query = """
             SELECT id, user_id, source, state, requested_at, started_at, finished_at,
-                   error_code, error_message, api_called, attempts
+                   error_code, error_message, api_called, attempts, mood_key, mood_label, mood_json
             FROM recommendation_jobs
             WHERE user_id=? AND source=? AND state IN ('queued', 'running')
-            ORDER BY id DESC LIMIT 1
-        """, (user_id, source)).fetchone()
+        """
+        params = [user_id, source]
+        if mood_key is not None:
+            query += " AND mood_key=?"
+            params.append(str(mood_key))
+        query += " ORDER BY id DESC LIMIT 1"
+        row = self.db.execute(query, params).fetchone()
         return self._recommendation_job(row)
 
     def latest_recommendation_job(self, user_id, source):
@@ -1222,42 +1265,75 @@ class Store:
         source = self._recommendation_source(source)
         row = self.db.execute("""
             SELECT id, user_id, source, state, requested_at, started_at, finished_at,
-                   error_code, error_message, api_called, attempts
+                   error_code, error_message, api_called, attempts, mood_key, mood_label, mood_json
             FROM recommendation_jobs
             WHERE user_id=? AND source=?
             ORDER BY requested_at DESC, id DESC LIMIT 1
         """, (user_id, source)).fetchone()
         return self._recommendation_job(row)
 
-    def enqueue_recommendation_job(self, user_id, source, *, now=None):
-        """Insert a queued job unless this user and source already has an active one."""
+    def enqueue_recommendation_job(self, user_id, source, *, now=None, mood=None):
+        """Insert a queued job unless this user, source, and mood already has an active one."""
         user_id = self._positive_id(user_id, "user_id")
         source = self._recommendation_source(source)
         moment = self._now(now)
+        mood = mood or {}
+        mood_key = str(mood.get("key") or "any|")[:200]
+        mood_label = str(mood.get("label") or "Любое")[:120]
+        mood_json = str(mood.get("json") or '{"chips":["any"],"note":""}')[:500]
         with self.db:
             existing = self.db.execute("""
                 SELECT id FROM recommendation_jobs
-                WHERE user_id=? AND source=? AND state IN ('queued', 'running')
+                WHERE user_id=? AND source=? AND mood_key=? AND state IN ('queued', 'running')
                 ORDER BY id DESC LIMIT 1
-            """, (user_id, source)).fetchone()
+            """, (user_id, source, mood_key)).fetchone()
             if existing:
                 job_id, created = int(existing[0]), False
             else:
                 try:
                     cursor = self.db.execute("""
                         INSERT INTO recommendation_jobs(
-                            user_id, source, state, requested_at, api_called, attempts
-                        ) VALUES (?, ?, 'queued', ?, 0, 0)
-                    """, (user_id, source, moment))
+                            user_id, source, state, requested_at, api_called, attempts,
+                            mood_key, mood_label, mood_json
+                        ) VALUES (?, ?, 'queued', ?, 0, 0, ?, ?, ?)
+                    """, (user_id, source, moment, mood_key, mood_label, mood_json))
                     job_id, created = int(cursor.lastrowid), True
                 except sqlite3.IntegrityError:
                     row = self.db.execute("""
                         SELECT id FROM recommendation_jobs
-                        WHERE user_id=? AND source=? AND state IN ('queued', 'running')
+                        WHERE user_id=? AND source=? AND mood_key=? AND state IN ('queued', 'running')
                         ORDER BY id DESC LIMIT 1
-                    """, (user_id, source)).fetchone()
+                    """, (user_id, source, mood_key)).fetchone()
                     job_id, created = int(row[0]), False
         return self.recommendation_job(job_id), created
+
+    def save_recommendation_mood(self, user_id, chips, note, *, now=None):
+        user_id = self._positive_id(user_id, "user_id")
+        payload = json.dumps([str(chip) for chip in chips or ()][:8], ensure_ascii=False)
+        text = str(note or "")[:80]
+        moment = self._now(now)
+        with self.db:
+            self.db.execute("""
+                INSERT INTO recommendation_mood_preference(user_id, chips, note, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    chips=excluded.chips, note=excluded.note, updated_at=excluded.updated_at
+            """, (user_id, payload, text, moment))
+
+    def recommendation_mood(self, user_id):
+        user_id = self._positive_id(user_id, "user_id")
+        row = self.db.execute(
+            "SELECT chips, note FROM recommendation_mood_preference WHERE user_id=?",
+            (user_id,)).fetchone()
+        if not row:
+            return None
+        try:
+            chips = json.loads(row[0])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            chips = ["any"]
+        if not isinstance(chips, list):
+            chips = ["any"]
+        return {"chips": [str(item) for item in chips], "note": row[1] or ""}
 
     def mark_recommendation_job_running(self, job_id, *, now=None):
         moment = self._now(now)
@@ -1310,7 +1386,7 @@ class Store:
     def unfinished_recommendation_jobs(self):
         rows = self.db.execute("""
             SELECT id, user_id, source, state, requested_at, started_at, finished_at,
-                   error_code, error_message, api_called, attempts
+                   error_code, error_message, api_called, attempts, mood_key, mood_label, mood_json
             FROM recommendation_jobs
             WHERE state IN ('queued', 'running')
             ORDER BY id ASC
@@ -1362,6 +1438,7 @@ class Store:
         pick = {"id": int(row[0]), "user_id": int(row[1]), "source": row[2], "job_id": row[3],
                 "created_at": float(row[4]), "pair_rating": row[5],
                 "pair_skipped": bool(row[6]), "feedback_at": row[7],
+                "mood_label": row[8] or "",
                 "items": items.get(int(row[0]), [])}
         return pick
 
@@ -1407,10 +1484,13 @@ class Store:
                 (int(job_id), user_id, source)).fetchone()
             if not current or current[0] != "running":
                 return None
+            mood_row = self.db.execute(
+                "SELECT mood_label FROM recommendation_jobs WHERE id=?", (int(job_id),)).fetchone()
             cursor = self.db.execute("""
-                INSERT INTO recommendation_picks(user_id, source, job_id, created_at, pair_skipped)
-                VALUES (?, ?, ?, ?, 0)
-            """, (user_id, source, int(job_id), moment))
+                INSERT INTO recommendation_picks(
+                    user_id, source, job_id, created_at, pair_skipped, mood_label
+                ) VALUES (?, ?, ?, ?, 0, ?)
+            """, (user_id, source, int(job_id), moment, (mood_row[0] if mood_row else "") or ""))
             pick_id = int(cursor.lastrowid)
             self.db.executemany("""
                 INSERT INTO recommendation_pick_items(
@@ -1428,7 +1508,8 @@ class Store:
     def recommendation_pick(self, user_id, pick_id):
         user_id = self._positive_id(user_id, "user_id")
         row = self.db.execute("""
-            SELECT id, user_id, source, job_id, created_at, pair_rating, pair_skipped, feedback_at
+            SELECT id, user_id, source, job_id, created_at, pair_rating, pair_skipped, feedback_at,
+                   mood_label
             FROM recommendation_picks WHERE id=? AND user_id=?
         """, (int(pick_id), user_id)).fetchone()
         if not row:
@@ -1439,7 +1520,8 @@ class Store:
         user_id = self._positive_id(user_id, "user_id")
         source = self._recommendation_source(source)
         row = self.db.execute("""
-            SELECT id, user_id, source, job_id, created_at, pair_rating, pair_skipped, feedback_at
+            SELECT id, user_id, source, job_id, created_at, pair_rating, pair_skipped, feedback_at,
+                   mood_label
             FROM recommendation_picks WHERE user_id=? AND source=?
             ORDER BY created_at DESC, id DESC LIMIT 1
         """, (user_id, source)).fetchone()
@@ -1457,7 +1539,8 @@ class Store:
             where += " AND source=?"
             params.append(self._recommendation_source(source))
         rows = self.db.execute(f"""
-            SELECT id, user_id, source, job_id, created_at, pair_rating, pair_skipped, feedback_at
+            SELECT id, user_id, source, job_id, created_at, pair_rating, pair_skipped, feedback_at,
+                   mood_label
             FROM recommendation_picks WHERE {where}
             ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
         """, [*params, limit, offset]).fetchall()
@@ -1478,7 +1561,8 @@ class Store:
         user_id = self._positive_id(user_id, "user_id")
         limit = max(1, min(20, int(limit)))
         rows = self.db.execute("""
-            SELECT id, user_id, source, job_id, created_at, pair_rating, pair_skipped, feedback_at
+            SELECT id, user_id, source, job_id, created_at, pair_rating, pair_skipped, feedback_at,
+                   mood_label
             FROM recommendation_picks
             WHERE user_id=? AND (pair_rating IS NOT NULL OR pair_skipped=1
                                  OR id IN (SELECT pick_id FROM recommendation_pick_items WHERE interested=1))

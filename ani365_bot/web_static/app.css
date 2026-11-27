@@ -46,6 +46,11 @@ h1, h2 { margin: 0; letter-spacing: -.04em; } h1 { font-size: clamp(28px, 7vw, 4
 .card .reason-toggle { width: auto; margin: 2px 0 0; padding: 6px 0; border: 0; background: transparent; color: #ffb4b0; font-size: 13px; font-weight: 750; }
 .source-switch { display: flex; gap: 8px; margin: 0 0 12px; }
 .source-switch button { flex: 1; margin: 0; }
+.mood-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.mood-chips button { padding: 8px 12px; border: 1px solid var(--line); border-radius: 999px; background: #171820; color: inherit; }
+.mood-chips button.selected { background: var(--accent); color: white; border-color: transparent; }
+.mood-note { display: block; margin-top: 8px; color: var(--muted); font-size: 14px; }
+.mood-note input { margin-top: 6px; }
 .score-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
 .score-row button { min-width: 36px; padding: 8px 0; border: 1px solid var(--line); border-radius: 10px; background: #171820; color: inherit; }
 .score-row button.selected { background: var(--accent); color: white; border-color: transparent; }

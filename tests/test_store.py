@@ -286,6 +286,69 @@ class StoreTests(unittest.TestCase):
         self.assertIn("recommendation_jobs", tables)
         self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
 
+    def test_v16_keeps_jobs_and_dedupes_by_mood(self):
+        self.store.close()
+        directory = self.directory / "legacy"
+        directory.mkdir()
+        (directory / "token.key").write_bytes(Fernet.generate_key())
+        db = sqlite3.connect(directory / "bot.sqlite3")
+        db.execute("PRAGMA user_version = 15")
+        db.execute("""
+            CREATE TABLE recommendation_jobs (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                state TEXT NOT NULL,
+                requested_at REAL NOT NULL,
+                started_at REAL,
+                finished_at REAL,
+                error_code TEXT,
+                error_message TEXT,
+                api_called INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        db.execute("""
+            CREATE TABLE recommendation_picks (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                job_id INTEGER,
+                created_at REAL NOT NULL,
+                pair_rating INTEGER,
+                pair_skipped INTEGER NOT NULL DEFAULT 0,
+                feedback_at REAL
+            )
+        """)
+        db.execute("""
+            INSERT INTO recommendation_jobs(user_id, source, state, requested_at)
+            VALUES (1, 'openai', 'ready', 1)
+        """)
+        db.commit()
+        db.close()
+        self.store = Store(directory)
+        legacy = self.store.recommendation_job(1)
+        self.assertEqual(legacy["state"], "ready")
+        self.assertEqual(legacy["mood_key"], "any|")
+        first, created = self.store.enqueue_recommendation_job(1, "openai", now=2, mood={
+            "key": "cyberpunk|", "label": "Киберпанк", "json": '{"chips":["cyberpunk"],"note":""}',
+        })
+        _second, again = self.store.enqueue_recommendation_job(1, "openai", now=3, mood={
+            "key": "cyberpunk|", "label": "Киберпанк", "json": '{"chips":["cyberpunk"],"note":""}',
+        })
+        other, created_other = self.store.enqueue_recommendation_job(1, "openai", now=4, mood={
+            "key": "isekai|", "label": "Исекай", "json": '{"chips":["isekai"],"note":""}',
+        })
+        self.assertTrue(created)
+        self.assertFalse(again)
+        self.assertTrue(created_other)
+        self.assertNotEqual(other["id"], first["id"])
+        self.store.save_recommendation_mood(1, ["cyberpunk"], "неон", now=5)
+        self.store.close()
+        self.store = Store(directory)
+        self.assertEqual(self.store.recommendation_mood(1), {"chips": ["cyberpunk"], "note": "неон"})
+        self.assertEqual(self.store.recommendation_job(first["id"])["mood_label"], "Киберпанк")
+
     def test_confirmed_external_ids_can_be_read_for_shared_metadata_cache(self):
         self.store.save_external_id(10, "mal", "501")
         self.store.save_external_id(11, "mal", "502")

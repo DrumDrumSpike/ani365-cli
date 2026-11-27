@@ -113,7 +113,8 @@ def select_candidates(candidates, *, excluded_shikimori_ids, excluded_series_ids
     for candidate in pool:
         buckets.setdefault(_year(candidate), []).append(candidate)
     for rows in buckets.values():
-        rows.sort(key=lambda candidate: (-_public_score(candidate), str(candidate.get("id") or "")))
+        rows.sort(key=lambda candidate: (
+            -int(candidate.get("_mood") or 0), -_public_score(candidate), str(candidate.get("id") or "")))
     years = sorted((year for year in buckets if year), reverse=True)
     if 0 in buckets:
         years.append(0)
