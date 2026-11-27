@@ -319,6 +319,20 @@
       };
     });
   }
+  const RECOMMENDATION_MOODS = [
+    ['cyberpunk', 'Киберпанк'], ['isekai', 'Исекай'], ['magic', 'Магические битвы'],
+    ['swords', 'Мечники/самураи'], ['dark', 'Мрачное'], ['light', 'Лёгкое/комедия'],
+    ['romance', 'Романтика'], ['psychological', 'Психологическое'], ['sports', 'Спорт'],
+    ['slice', 'Повседневность'], ['any', 'Любое'],
+  ];
+  function cleanMoodNote(value) {
+    return String(value || '').replace(/[\u0000-\u001f\u007f<>`«»]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+  }
+  function recommendationMoodKey(chips, note) {
+    const chosen = (chips || []).filter(id => id && id !== 'any');
+    const ids = chosen.length ? [...chosen].sort() : ['any'];
+    return ids.join(',') + '|' + cleanMoodNote(note).toLocaleLowerCase('ru').replace(/ё/g, 'е');
+  }
   let recommendationTimer;
   function openRecommendation(items, seriesId) {
     const item = items.find(row => Number(row.anime365_series_id) === Number(seriesId));
@@ -335,9 +349,10 @@
       const blocks = (data.items || []).map(pick => {
         const when = new Date(pick.created_at * 1000).toLocaleString('ru-RU');
         const verdict = pick.pair_skipped ? 'Пропущено' : pick.pair_rating ? `Оценка пары: ${pick.pair_rating}` : 'Без отзыва';
+        const moodText = pick.mood_label && pick.mood_label !== 'Любое' ? ` · Настроение: ${esc(pick.mood_label)}` : '';
         const liked = (pick.items || []).filter(item => item.interested).map(item => item.title);
         const body = pick.items && pick.items.length ? recommendationCards(pick.items) : '<p class="empty">В этой подборке не было тайтлов.</p>';
-        return `<section class="panel"><p class="meta">${esc(when)} · ${esc(verdict)}${liked.length ? ` · Интересно: ${esc(liked.join(', '))}` : ''}</p>${body}</section>`;
+        return `<section class="panel"><p class="meta">${esc(when)} · ${esc(verdict)}${moodText}${liked.length ? ` · Интересно: ${esc(liked.join(', '))}` : ''}</p>${body}</section>`;
       }).join('');
       root.innerHTML = `<section class="page-heading"><p class="eyebrow">${esc(source === 'xai' ? 'Grok' : 'ChatGPT')}</p><h1>История подборок</h1></section>${blocks || '<p class="empty">Пока нет прошлых подборок.</p>'}<button class="action secondary back">Назад</button>`;
       useBack(); root.querySelector('.back').onclick = () => recommendations(source);
@@ -366,28 +381,58 @@
       const current = data.sources[source];
       const job = current.job;
       const pick = current.pick;
-      const active = job && (job.state === 'queued' || job.state === 'running');
-      const statusText = !job ? '' : job.state === 'queued' ? 'Подбор в очереди. Можно закрыть приложение — запрос не продублируется.' : job.state === 'running' ? 'Подбираем аниме. Прошлая подборка остаётся на экране.' : job.state === 'failed' ? job.error_message || 'Не удалось подобрать аниме.' : '';
+      const moodOptions = data.moods && data.moods.length ? data.moods : RECOMMENDATION_MOODS.map(([id, label]) => ({id, label}));
+      const remembered = state.recommendationMood || data.mood || {};
+      const selectedMoods = new Set(remembered.chips || ['any']);
+      if (![...selectedMoods].some(id => id !== 'any')) { selectedMoods.clear(); selectedMoods.add('any'); }
+      let moodNote = cleanMoodNote(remembered.note);
+      const rememberMood = () => { state.recommendationMood = {chips: [...selectedMoods], note: moodNote}; };
+      const moodKey = () => recommendationMoodKey([...selectedMoods], moodNote);
+      const moodActive = () => Boolean(job && (job.state === 'queued' || job.state === 'running') && (job.mood_key || 'any|') === moodKey());
+      const active = moodActive();
+      const moodStatus = job && job.mood_label && job.mood_label !== 'Любое' ? ` Настроение: ${job.mood_label}.` : '';
+      const statusText = !job ? '' : job.state === 'queued' ? `Подбор в очереди.${moodStatus} Можно закрыть приложение — запрос не продублируется.` : job.state === 'running' ? `Подбираем аниме.${moodStatus} Прошлая подборка остаётся на экране.` : job.state === 'failed' ? job.error_message || 'Не удалось подобрать аниме.' : '';
       const remaining = Math.max(0, Number(current.daily_limit) - Number(current.daily_used));
       const continuations = data.continuations || [];
       const continuationBlock = continuations.length ? `<section class="panel"><h2>Вышло продолжение</h2><p class="meta">Следующий сезон того, что вы уже смотрели. Это не занимает место в подборке.</p>${recommendationCards(continuations.map(item => ({...item, reason: item.after_title ? `После «${item.after_title}»` : ''})) )}</section>` : '';
       let pickBlock = '';
       if (pick && pick.items && pick.items.length) {
         const saved = pick.pair_skipped ? 'Пара пропущена.' : pick.pair_rating ? `Ваша оценка пары: ${pick.pair_rating}.` : '';
-        pickBlock = `${recommendationCards(pick.items)}<section class="panel"><h2>Как вам пара?</h2><p class="meta">Оценка пары не меняет веса жанров. Она только передаётся в следующий запрос. Отметьте, что хочется посмотреть.</p><div class="score-row" id="pair-scores">${[1,2,3,4,5,6,7,8,9,10].map(score => `<button type="button" data-score="${score}" class="${pick.pair_rating === score ? 'selected' : ''}">${score}</button>`).join('')}</div><button class="action secondary" id="skip-pair">Пропустить</button><div>${pick.items.map(item => `<label><input type="checkbox" data-interest="${esc(item.shikimori_anime_id)}" ${item.interested ? 'checked' : ''}> ${esc(item.title)}</label><br>`).join('')}</div><button class="action" id="save-feedback">Сохранить отзыв</button><p class="meta" id="feedback-state">${esc(saved)}</p></section>`;
+        const pickMood = pick.mood_label && pick.mood_label !== 'Любое' ? `<p class="meta">Настроение: ${esc(pick.mood_label)}</p>` : '';
+        pickBlock = `${pickMood}${recommendationCards(pick.items)}<section class="panel"><h2>Как вам пара?</h2><p class="meta">Оценка пары не меняет веса жанров. Она только передаётся в следующий запрос. Отметьте, что хочется посмотреть.</p><div class="score-row" id="pair-scores">${[1,2,3,4,5,6,7,8,9,10].map(score => `<button type="button" data-score="${score}" class="${pick.pair_rating === score ? 'selected' : ''}">${score}</button>`).join('')}</div><button class="action secondary" id="skip-pair">Пропустить</button><div>${pick.items.map(item => `<label><input type="checkbox" data-interest="${esc(item.shikimori_anime_id)}" ${item.interested ? 'checked' : ''}> ${esc(item.title)}</label><br>`).join('')}</div><button class="action" id="save-feedback">Сохранить отзыв</button><p class="meta" id="feedback-state">${esc(saved)}</p></section>`;
       } else if (pick) {
         pickBlock = '<p class="empty">Сейчас нет тайтла, который хорошо подходит. Можно попробовать позже или другой источник.</p>';
       } else if (!active) {
         pickBlock = '<p class="empty">Нажмите «Подобрать аниме». Пришлём не больше двух тайтлов и коротко объясним, почему они могут вам зайти.</p>';
       }
-      root.innerHTML = `<section class="page-heading"><p class="eyebrow">Для вас</p><h1>Рекомендации</h1><p class="meta">Оценки сравниваются с вашей обычной шкалой. «Брошено» учитывается отдельно и не штрафует жанры.</p></section><div class="source-switch"><button class="action ${source === 'openai' ? '' : 'secondary'}" data-source="openai">ChatGPT</button><button class="action ${source === 'xai' ? '' : 'secondary'}" data-source="xai">Grok</button></div><p class="meta">Сегодня осталось ${esc(remaining)} из ${esc(current.daily_limit)} для ${esc(current.label)}.</p>${current.configured ? '' : '<p class="meta">Ключ этого источника не настроен на сервере.</p>'}<button class="action" id="recommend">${active ? 'Обновить статус' : 'Подобрать аниме'}</button><p class="${job && job.state === 'failed' ? 'error' : 'meta'}" id="recommendation-error">${esc(statusText)}</p>${continuationBlock}${pickBlock}<button class="action secondary" id="recommendation-history">История</button><button class="action secondary back">Назад</button>`;
+      const moodBlock = `<section class="panel"><h2>Настроение</h2><p class="meta">Можно выбрать несколько. «Любое» подбирает как раньше, по вкусу.</p><div class="mood-chips">${moodOptions.map(item => `<button type="button" data-mood="${esc(item.id)}" class="${selectedMoods.has(item.id) ? 'selected' : ''}">${esc(item.label)}</button>`).join('')}</div><label class="mood-note">Уточнение<input id="mood-note" maxlength="80" value="${esc(moodNote)}" placeholder="Необязательно, пара слов"></label></section>`;
+      root.innerHTML = `<section class="page-heading"><p class="eyebrow">Для вас</p><h1>Рекомендации</h1><p class="meta">Оценки сравниваются с вашей обычной шкалой. «Брошено» учитывается отдельно и не штрафует жанры.</p></section><div class="source-switch"><button class="action ${source === 'openai' ? '' : 'secondary'}" data-source="openai">ChatGPT</button><button class="action ${source === 'xai' ? '' : 'secondary'}" data-source="xai">Grok</button></div><p class="meta">Сегодня осталось ${esc(remaining)} из ${esc(current.daily_limit)} для ${esc(current.label)}.</p>${current.configured ? '' : '<p class="meta">Ключ этого источника не настроен на сервере.</p>'}${moodBlock}<button class="action" id="recommend">${active ? 'Обновить статус' : 'Подобрать аниме'}</button><p class="${job && job.state === 'failed' ? 'error' : 'meta'}" id="recommendation-error">${esc(statusText)}</p>${continuationBlock}${pickBlock}<button class="action secondary" id="recommendation-history">История</button><button class="action secondary back">Назад</button>`;
       useBack(); root.querySelector('.back').onclick = more;
       root.querySelectorAll('[data-source]').forEach(button => button.onclick = () => recommendations(button.dataset.source));
+      const paintMoods = () => {
+        root.querySelectorAll('[data-mood]').forEach(button => button.classList.toggle('selected', selectedMoods.has(button.dataset.mood)));
+        const recommend = root.querySelector('#recommend');
+        if (recommend) recommend.textContent = moodActive() ? 'Обновить статус' : 'Подобрать аниме';
+      };
+      root.querySelectorAll('[data-mood]').forEach(button => button.onclick = () => {
+        const id = button.dataset.mood;
+        if (id === 'any') { selectedMoods.clear(); selectedMoods.add('any'); }
+        else {
+          selectedMoods.delete('any');
+          if (selectedMoods.has(id)) selectedMoods.delete(id); else selectedMoods.add(id);
+          if (!selectedMoods.size) selectedMoods.add('any');
+        }
+        rememberMood();
+        paintMoods();
+      });
+      const noteInput = root.querySelector('#mood-note');
+      if (noteInput) noteInput.oninput = () => { moodNote = cleanMoodNote(noteInput.value); rememberMood(); paintMoods(); };
       root.querySelector('#recommend').onclick = async () => {
         const button = root.querySelector('#recommend');
         try {
           button.disabled = true;
-          await api(`/api/recommendations/${source}`, {method:'POST'});
+          moodNote = cleanMoodNote(noteInput ? noteInput.value : moodNote);
+          await api(`/api/recommendations/${source}`, {method:'POST', body:JSON.stringify({chips:[...selectedMoods], note:moodNote})});
           await recommendations(source);
         } catch (error) {
           const slot = root.querySelector('#recommendation-error');

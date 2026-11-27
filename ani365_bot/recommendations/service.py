@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 
@@ -9,6 +10,7 @@ from .candidates import select_candidates, user_franchises
 from .catalog import CatalogError
 from .continuations import find_continuations
 from .llm import LLMError, user_message
+from .mood import apply_mood, mood_searches, normalize_mood
 from .parser import ParseError, parse_picks
 from .prompt import SYSTEM_PROMPT, build_user_prompt
 from .resolve import resolve_candidates
@@ -44,18 +46,20 @@ class RecommendationService:
         self.refresh_rates = refresh_rates
         self._now = now or time.time
 
-    def request(self, user_id, source):
-        """Queue one job, or return the job already queued or running for this source."""
+    def request(self, user_id, source, mood=None):
+        """Queue one job, or return the job already queued for this source and mood."""
         self._source(source)
+        mood = normalize_mood(mood)
         if not self.store.external_account_status(user_id, "shikimori")["connected"]:
             raise RecommendationRequestError("Сначала подключите Shikimori.", 409)
-        active = self.store.active_recommendation_job(user_id, source)
+        self.store.save_recommendation_mood(user_id, mood["chips"], mood["note"], now=self._now())
+        active = self.store.active_recommendation_job(user_id, source, mood["key"])
         if active:
             return active, False
         used = self.store.recommendation_api_calls_since(user_id, source, self._now() - 24 * 60 * 60)
         if used >= self.daily_limit:
             raise RecommendationRequestError(user_message(source, "daily_limit"), 429)
-        return self.store.enqueue_recommendation_job(user_id, source, now=self._now())
+        return self.store.enqueue_recommendation_job(user_id, source, now=self._now(), mood=mood)
 
     def recover(self):
         """Resume jobs that never called an API. Fail the rest without a second call."""
@@ -102,14 +106,15 @@ class RecommendationService:
                 await self._save_continuations(user_id, rates, metadata, load_related=True)
             except (CatalogError, OSError):
                 LOG.info("Continuation refresh skipped (user=%s)", user_id)
-            candidates = await self._candidates(user_id, rates, metadata, profile)
+            mood = self._job_mood(job)
+            candidates = await self._candidates(user_id, rates, metadata, profile, mood)
             if not candidates:
                 self.store.complete_recommendation_job(job_id, user_id, source, [], now=self._now())
                 return
             prompt = build_user_prompt(
                 profile, self.store.recent_recommendation_feedback(user_id, limit=5),
                 sorted((value for value in self.store.recommended_shikimori_ids(user_id)
-                        if str(value).isdigit()), key=int), candidates)
+                        if str(value).isdigit()), key=int), candidates, mood)
             raw = await self._complete(job_id, client, prompt)
             try:
                 picks = parse_picks(raw, [item["id"] for item in candidates])
@@ -164,9 +169,22 @@ class RecommendationService:
         metadata = await self.catalog.metadata(identifiers[:TASTE_METADATA_LIMIT], related=False) if identifiers else {}
         return taste_profile(rates, metadata), metadata
 
-    async def _candidates(self, user_id, rates, metadata, profile):
+    def _job_mood(self, job):
+        raw = (job or {}).get("mood_json")
+        if raw:
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                parsed = None
+            if isinstance(parsed, dict):
+                return normalize_mood(parsed)
+        return normalize_mood(None)
+
+    async def _candidates(self, user_id, rates, metadata, profile, mood=None):
+        mood = mood if isinstance(mood, dict) else normalize_mood(None)
         genres = top_genres(profile["genre_weights"], limit=4)
-        if not genres:
+        searches = mood_searches(mood)
+        if not genres and not searches:
             return []
         excluded = {str(rate.get("external_anime_id") or "").strip() for rate in rates
                     if isinstance(rate, dict)}
@@ -174,7 +192,7 @@ class RecommendationService:
         franchises = user_franchises(rates, metadata)
         recommended = self.store.recommended_shikimori_ids(user_id)
         library = set((self.store.recommendation_profile(user_id) or {}).get("excluded_anime365_series_ids") or ())
-        raw = await self.catalog.candidates(genres)
+        raw = apply_mood(await self.catalog.candidates(genres, searches=searches), mood)
         narrowed = select_candidates(
             raw, excluded_shikimori_ids=excluded, excluded_series_ids=library,
             excluded_franchises=franchises, already_recommended_ids=recommended,

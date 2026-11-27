@@ -232,9 +232,9 @@ function boot(payloads) {
       observe() {}
       disconnect() {}
     },
-    fetch: async input => {
+    fetch: async (input, options = {}) => {
       const url = String(input);
-      fetchCalls.push(url);
+      fetchCalls.push({url, body: options.body || null, method: options.method || 'GET'});
       const body = url.startsWith('/api/me') ? {user_id: 42}
         : url.startsWith('/api/library') ? {items: [], new_episodes: []}
         : url.startsWith('/api/recommendations/history') ? payloads.history
@@ -296,7 +296,7 @@ test('recommendations view renders every owner-visible state without a TDZ error
     current: recommendationBody(),
     history: {items: []},
   };
-  const {root} = boot(payloads);
+  const {root, fetchCalls} = boot(payloads);
   await flush();
   assert.doesNotMatch(root.innerHTML, /before initialization/);
 
@@ -315,6 +315,22 @@ test('recommendations view renders every owner-visible state without a TDZ error
   await openRecommendations(root);
   assert.match(root.innerHTML, /Подобрать аниме/);
   assert.match(root.innerHTML, /Нажмите «Подобрать аниме»/);
+  assert.match(root.innerHTML, /Киберпанк/);
+  assert.match(root.innerHTML, /Любое/);
+  assert.match(root.innerHTML, /id="mood-note"/);
+  assert.match(root.innerHTML, /maxlength="80"/);
+  root.querySelector('[data-mood="cyberpunk"]').click();
+  root.querySelector('[data-mood="swords"]').click();
+  assert.ok(root.querySelector('[data-mood="cyberpunk"]').classList.contains('selected'));
+  assert.ok(root.querySelector('[data-mood="swords"]').classList.contains('selected'));
+  assert.ok(!root.querySelector('[data-mood="any"]').classList.contains('selected'));
+  root.querySelector('#recommend').click();
+  await flush();
+  const posted = fetchCalls.filter(call => call.method === 'POST' && String(call.body || '').includes('cyberpunk'));
+  assert.ok(posted.length);
+  assert.deepEqual(JSON.parse(posted.at(-1).body).chips, ['cyberpunk', 'swords']);
+  root.querySelector('[data-mood="any"]').click();
+  assert.ok(root.querySelector('[data-mood="any"]').classList.contains('selected'));
 
   payloads.current = recommendationBody({
     job: {id: 1, state: 'running', error_message: null},
@@ -355,6 +371,7 @@ test('recommendations view renders every owner-visible state without a TDZ error
 
   payloads.history = {items: [{
     id: 8, source: 'openai', created_at: 1_700_000_000, pair_rating: 2, pair_skipped: false,
+    mood_label: 'Киберпанк',
     items: [{shikimori_anime_id: '11', anime365_series_id: 56, title: 'Готовая пара', year: 2020, kind: 'tv', reason: 'Как и «Адский рай», который ты оценил на 9, эта история держит тот же тон без спойлеров и досматривается до конца.', interested: true}],
   }]};
   root.querySelector('#recommendation-history').click();
@@ -363,8 +380,10 @@ test('recommendations view renders every owner-visible state without a TDZ error
   assert.match(root.innerHTML, /Готовая пара/);
   assert.match(root.innerHTML, /досматривается до конца/);
   assert.match(root.innerHTML, /Оценка пары: 2/);
+  assert.match(root.innerHTML, /Настроение: Киберпанк/);
   const historyToggle = root.querySelector('[data-reason-toggle]');
   historyToggle.click();
   assert.match(root.innerHTML, /recommendation-reason expanded/);
+  assert.equal(historyToggle.textContent, 'Свернуть');
   assert.doesNotMatch(root.innerHTML, /before initialization/);
 });

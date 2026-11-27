@@ -22,7 +22,7 @@ from urllib.parse import parse_qsl, urljoin, urlsplit
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .api import APIError, Anime365, number, title
 from .store import HENTAI_SERIES_OFFSET
@@ -36,6 +36,7 @@ from .seasonal import SeasonalCatalog
 from .translations import group_translations, viewing_type
 from .subtitle_fonts import subtitle_fonts
 from .recommendations import SOURCE_LABELS, SOURCES, RecommendationService
+from .recommendations.mood import MOOD_CHOICES, normalize_mood
 from .recommendations.catalog import ShikimoriCatalog
 from .recommendations.llm import ChatCompletionsClient
 from .recommendations.service import RecommendationRequestError
@@ -334,6 +335,11 @@ class RecommendationFeedbackRequest(BaseModel):
     pair_rating: int | None = Field(default=None, ge=1, le=10)
     skip: bool = False
     interested_ids: list[str] | None = Field(default=None, max_length=2)
+
+
+class RecommendationMoodRequest(BaseModel):
+    chips: list[str] = Field(default_factory=list, max_length=12)
+    note: str = Field(default="", max_length=200)
 
 
 def _api_error(exc):
@@ -1043,14 +1049,17 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
             return None
         return {"id": job["id"], "source": job["source"], "state": job["state"],
                 "requested_at": job["requested_at"], "finished_at": job["finished_at"],
-                "error_code": job["error_code"], "error_message": job["error_message"]}
+                "error_code": job["error_code"], "error_message": job["error_message"],
+                "mood_key": job.get("mood_key") or "any|",
+                "mood_label": job.get("mood_label") or ""}
 
     def public_recommendation_pick(pick):
         if not pick:
             return None
         return {"id": pick["id"], "source": pick["source"], "created_at": pick["created_at"],
                 "pair_rating": pick["pair_rating"], "pair_skipped": pick["pair_skipped"],
-                "feedback_at": pick["feedback_at"], "items": [
+                "feedback_at": pick["feedback_at"], "mood_label": pick.get("mood_label") or "",
+                "items": [
                     {"shikimori_anime_id": item["shikimori_anime_id"], "mal_id": item["mal_id"],
                      "anime365_series_id": item["anime365_series_id"], "title": item["title"],
                      "year": item["year"], "kind": item["kind"], "genres": item["genres"],
@@ -1075,7 +1084,11 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
                 "pick": public_recommendation_pick(pick),
             }
         refreshing = app.state.continuation_tasks.get(user_id)
+        mood = normalize_mood(store.recommendation_mood(user_id))
         return {"shikimori_connected": connected,
+                "moods": MOOD_CHOICES,
+                "mood": {"chips": mood["chips"], "note": mood["note"], "key": mood["key"],
+                         "label": mood["label"]},
                 "shikimori_configured": bool(app.state.shikimori.configured),
                 "continuations": store.recommendation_continuations(user_id),
                 "continuations_refreshing": bool(refreshing and not refreshing.done()),
@@ -1183,9 +1196,18 @@ def create_app(config=None, store=None, anime=None, hentai=None, mal=None, *, pr
                 "next_offset": offset + len(items) if len(items) == limit else None}
 
     @app.post("/api/recommendations/{source}", status_code=202)
-    async def request_recommendations(source: str, user_id=Depends(authenticated_user)):
+    async def request_recommendations(source: str, request: Request,
+                                      user_id=Depends(authenticated_user)):
+        raw = await request.body()
+        mood = None
+        if raw.strip():
+            try:
+                payload = RecommendationMoodRequest.model_validate_json(raw)
+            except ValidationError:
+                raise HTTPException(422, "Некорректное настроение.") from None
+            mood = {"chips": payload.chips, "note": payload.note}
         try:
-            job, created = app.state.recommendations.request(user_id, source)
+            job, created = app.state.recommendations.request(user_id, source, mood)
         except RecommendationRequestError as exc:
             raise HTTPException(exc.status, str(exc)) from None
         if created:

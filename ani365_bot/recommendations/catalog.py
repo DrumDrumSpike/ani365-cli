@@ -105,8 +105,8 @@ class ShikimoriCatalog:
                     result[item["id"]] = item
         return result
 
-    async def candidates(self, genre_ids):
-        """Mix ranked hits with other years instead of one shared top-ranked page."""
+    async def candidates(self, genre_ids, searches=()):
+        """Mix ranked hits with other years, plus mood searches when a vibe is set."""
         genres = []
         for value in genre_ids or ():
             text = str(value).strip()
@@ -122,6 +122,13 @@ class ShikimoriCatalog:
                             "limit": 8})
         if genres:
             queries.append({"genre": genres[0], "order": "aired_on", "season": "1990_2009", "limit": 8})
+        terms = []
+        for value in searches or ():
+            text = " ".join(str(value or "").split())[:40]
+            if text and text not in terms:
+                terms.append(text)
+            if len(terms) == 3:
+                break
         query = """query RecommendationCandidates($genre: String!, $order: OrderEnum!, $season: SeasonString, $limit: PositiveInt) {
           animes(genre: $genre, limit: $limit, order: $order, season: $season,
                  kind: "tv,movie,ona,ova", status: "released", censored: true) {
@@ -130,7 +137,15 @@ class ShikimoriCatalog:
             related { relationKind anime { id } }
           }
         }"""
-        result, errors = {}, 0
+        search_query = """query MoodCandidates($search: String!, $limit: PositiveInt) {
+          animes(search: $search, limit: $limit, order: ranked,
+                 kind: "tv,movie,ona,ova", status: "released", censored: true) {
+            id malId name russian score kind franchise airedOn { year }
+            genres { id name }
+            related { relationKind anime { id } }
+          }
+        }"""
+        result, errors, planned = {}, 0, len(queries) + len(terms)
         for offset, variables in enumerate(queries):
             if offset and self.delay:
                 await asyncio.sleep(self.delay)
@@ -143,6 +158,18 @@ class ShikimoriCatalog:
                 item = normalize_anime(row, include_related=True)
                 if item:
                     result.setdefault(item["id"], item)
-        if queries and errors == len(queries):
+        for term in terms:
+            if (queries or result or errors) and self.delay:
+                await asyncio.sleep(self.delay)
+            try:
+                rows = await self._query(search_query, {"search": term, "limit": 15})
+            except CatalogError:
+                errors += 1
+                continue
+            for row in rows:
+                item = normalize_anime(row, include_related=True)
+                if item:
+                    result.setdefault(item["id"], item)
+        if planned and errors == planned:
             raise CatalogError("Shikimori is temporarily unavailable")
         return list(result.values())
