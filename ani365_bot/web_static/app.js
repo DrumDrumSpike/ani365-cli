@@ -295,9 +295,29 @@
   }
   function recommendationCards(items) {
     return `<section class="grid">${items.map(item => {
-      const body = `${item.poster_url ? `<img class="poster" src="${esc(item.poster_url)}" alt="" loading="lazy">` : '<div class="poster catalog-placeholder">Anime365</div>'}<strong>${esc(item.title)}</strong><div class="meta">${esc(item.year || 'Год не указан')}${item.kind || item.series_type ? ` · ${esc(item.kind || item.series_type)}` : ''}</div>${item.reason ? `<p class="recommendation-reason">${esc(item.reason)}</p>` : ''}${item.anime365_series_id ? '' : '<p class="meta">Нет карточки Anime365</p>'}`;
-      return item.anime365_series_id ? `<article class="card"><button data-recommendation="${esc(item.anime365_series_id)}">${body}</button></article>` : `<article class="card">${body}</article>`;
+      const poster = item.poster_url ? `<img class="poster" src="${esc(item.poster_url)}" alt="" loading="lazy">` : '<div class="poster catalog-placeholder">Anime365</div>';
+      const heading = `<strong>${esc(item.title)}</strong><div class="meta">${esc(item.year || 'Год не указан')}${item.kind || item.series_type ? ` · ${esc(item.kind || item.series_type)}` : ''}</div>`;
+      const opener = item.anime365_series_id ? `<button data-recommendation="${esc(item.anime365_series_id)}">${poster}${heading}</button>` : `${poster}${heading}`;
+      const reason = item.reason ? `<p class="recommendation-reason">${esc(item.reason)}</p><button type="button" class="reason-toggle" data-reason-toggle>Подробнее</button>` : '';
+      const missing = item.anime365_series_id ? '' : '<p class="meta">Нет карточки Anime365</p>';
+      return `<article class="card">${opener}${reason}${missing}</article>`;
     }).join('')}</section>`;
+  }
+  function bindReasonToggles(scope) {
+    scope.querySelectorAll('[data-reason-toggle]').forEach(button => {
+      const reason = button.previousElementSibling;
+      if (!reason || !reason.classList) return;
+      if (reason.clientHeight && reason.scrollHeight <= reason.clientHeight + 1) {
+        button.hidden = true;
+        return;
+      }
+      button.onclick = event => {
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        const open = reason.classList.toggle('expanded');
+        button.textContent = open ? 'Свернуть' : 'Подробнее';
+      };
+    });
   }
   let recommendationTimer;
   function openRecommendation(items, seriesId) {
@@ -325,6 +345,7 @@
         try { await openRecommendation((data.items || []).flatMap(pick => pick.items || []), button.dataset.recommendation); }
         catch (error) { fail(error); }
       });
+      bindReasonToggles(root);
     } catch (error) { fail(error); }
   }
   async function recommendations(preferredSource) {
@@ -380,6 +401,7 @@
         try { await openRecommendation(cards, button.dataset.recommendation); }
         catch (error) { fail(error); }
       });
+      bindReasonToggles(root);
       const save = root.querySelector('#save-feedback');
       if (save && pick) {
         let selected = pick.pair_rating || null;

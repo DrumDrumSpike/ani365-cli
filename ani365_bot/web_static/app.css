@@ -41,7 +41,9 @@ h1, h2 { margin: 0; letter-spacing: -.04em; } h1 { font-size: clamp(28px, 7vw, 4
 .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px 12px; }.card { min-width: 0; }.card button { width: 100%; border: 0; padding: 0; background: transparent; color: inherit; text-align: left; }
 .poster { display: block; width: 100%; aspect-ratio: 2/3; margin-bottom: 11px; border-radius: 18px; object-fit: cover; background: #111; box-shadow: 0 5px 18px rgba(0,0,0,.14); transition: transform .2s ease; }.card button:hover .poster { transform: translateY(-2px); }
 .card strong { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-size: 15px; line-height: 1.25; }.card .meta { margin-top: 5px; color: rgba(255,255,255,.43); font-size: 13px; }.catalog-placeholder { display: grid; place-items: center; color: var(--muted); font-size: 14px; }
-.recommendation-reason { display: -webkit-box; overflow: hidden; margin: 7px 0 0; -webkit-box-orient: vertical; -webkit-line-clamp: 6; color: #bdb8d9; font-size: 12px; line-height: 1.35; }
+.recommendation-reason { display: -webkit-box; overflow: hidden; margin: 7px 0 0; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow-wrap: anywhere; color: #bdb8d9; font-size: 13px; line-height: 1.4; }
+.recommendation-reason.expanded { display: block; overflow: visible; -webkit-line-clamp: unset; }
+.card .reason-toggle { width: auto; margin: 2px 0 0; padding: 6px 0; border: 0; background: transparent; color: #ffb4b0; font-size: 13px; font-weight: 750; }
 .source-switch { display: flex; gap: 8px; margin: 0 0 12px; }
 .source-switch button { flex: 1; margin: 0; }
 .score-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
@@ -91,6 +93,7 @@ video { display: block; width: 100%; max-height: 75vh; border-radius: 18px; back
 .telegram-theme button.secondary { color: var(--text); background: var(--surface); }
 .telegram-theme .top-settings, .telegram-theme .card .meta, .telegram-theme .text-link,
 .telegram-theme .search-field input::placeholder, .telegram-theme .recommendation-reason { color: var(--muted); }
+.telegram-theme .reason-toggle { color: var(--tg-theme-link-color, var(--accent)); }
 .telegram-theme .continue-hero, .telegram-theme .welcome-hero, .telegram-theme .hero-all { color: #fff; }
 .telegram-theme .hero-copy .eyebrow, .telegram-theme .welcome-hero .eyebrow { color: #ff9691; }
 
