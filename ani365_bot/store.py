@@ -8,7 +8,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 
 HENTAI_SERIES_OFFSET = 1_000_000_000_000
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 
 class StateError(ValueError):
@@ -163,6 +163,11 @@ class Store:
             with self.db:
                 self._create_v17()
                 self.db.execute("PRAGMA user_version = 17")
+            version = 17
+        if version < 18:
+            with self.db:
+                self._create_v18()
+                self.db.execute("PRAGMA user_version = 18")
 
     def seasonal_snapshot(self):
         row = self.db.execute("SELECT payload FROM seasonal_catalog WHERE id=1").fetchone()
@@ -623,6 +628,15 @@ class Store:
                 fetched_at REAL NOT NULL
             )
         """)
+
+    def _create_v18(self):
+        """Store the continuation caption next to the source title."""
+        tables = {row[0] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "recommendation_continuations" not in tables:
+            return
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(recommendation_continuations)")}
+        if "caption" not in columns:
+            self.db.execute("ALTER TABLE recommendation_continuations ADD COLUMN caption TEXT NOT NULL DEFAULT ''")
 
     @staticmethod
     def _now(value):
@@ -1717,6 +1731,7 @@ class Store:
             shikimori_id = str(item.get("shikimori_anime_id") or "").strip()
             title = str(item.get("title") or "").strip()[:180]
             after = str(item.get("after_title") or "").strip()[:180]
+            caption = str(item.get("caption") or "").strip()[:300]
             if not shikimori_id.isdigit() or not title or not after or shikimori_id in seen:
                 continue
             seen.add(shikimori_id)
@@ -1729,14 +1744,15 @@ class Store:
                            series_id, title, str(item.get("year") or "").strip()[:32] or None,
                            str(item.get("kind") or "").strip()[:32] or None,
                            str(item.get("poster_url") or "").strip()[:1000] or None,
-                           after, str(item.get("after_shikimori_anime_id") or "").strip()[:32], moment))
+                           after, str(item.get("after_shikimori_anime_id") or "").strip()[:32],
+                           caption, moment))
         with self.db:
             self.db.execute("DELETE FROM recommendation_continuations WHERE user_id=?", (user_id,))
             self.db.executemany("""
                 INSERT INTO recommendation_continuations(
                     user_id, shikimori_anime_id, mal_id, anime365_series_id, title, year, kind,
-                    poster_url, after_title, after_shikimori_anime_id, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    poster_url, after_title, after_shikimori_anime_id, caption, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, values)
             self.db.execute("""
                 INSERT INTO recommendation_continuation_state(user_id, updated_at) VALUES (?, ?)
@@ -1748,12 +1764,12 @@ class Store:
         user_id = self._positive_id(user_id, "user_id")
         rows = self.db.execute("""
             SELECT shikimori_anime_id, mal_id, anime365_series_id, title, year, kind, poster_url,
-                   after_title, after_shikimori_anime_id, updated_at
+                   after_title, after_shikimori_anime_id, caption, updated_at
             FROM recommendation_continuations WHERE user_id=?
             ORDER BY year DESC, title COLLATE NOCASE
         """, (user_id,)).fetchall()
         keys = ("shikimori_anime_id", "mal_id", "anime365_series_id", "title", "year", "kind",
-                "poster_url", "after_title", "after_shikimori_anime_id", "updated_at")
+                "poster_url", "after_title", "after_shikimori_anime_id", "caption", "updated_at")
         return [dict(zip(keys, row)) for row in rows]
 
     def recommendation_continuations_updated_at(self, user_id):
