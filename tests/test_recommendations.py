@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from ani365_bot.config import Config, ConfigError
 from ani365_bot.recommendations.candidates import select_candidates
+from ani365_bot.recommendations.catalog import normalize_anime
 from ani365_bot.recommendations.continuations import find_continuations
 from ani365_bot.recommendations.llm import ChatCompletionsClient, LLMError
 from ani365_bot.recommendations.parser import ParseError, parse_picks
@@ -81,6 +82,64 @@ class TasteTests(unittest.TestCase):
         self.assertEqual(low["label"], "stands_out_low")
         self.assertLess(low["weight"], 0)
         self.assertLess(low["weight"], relative_signal(10, harsh)["weight"])
+
+    def test_unrated_and_malformed_scores_do_not_break_the_personal_scale(self):
+        mixed = score_distribution([6, None, 0, 7, 11, "9", "нет", "", 10])
+        self.assertEqual(mixed["count"], 4)
+        self.assertEqual(relative_signal(7, mixed)["label"], "typical")
+        self.assertEqual(score_distribution([None, 0, "0"])["median"], None)
+        self.assertEqual(score_distribution([])["count"], 0)
+        rates = [
+            {"external_anime_id": "1", "status": "completed", "score": None, "title": "Без оценки"},
+            {"external_anime_id": "2", "status": "completed", "score": 0, "title": "Ноль"},
+            {"external_anime_id": "3", "status": "completed", "score": 7, "title": "Обычное"},
+            {"external_anime_id": "4", "status": "completed", "score": "11", "title": "Вне шкалы"},
+            {"external_anime_id": "5", "status": "watching", "score": None, "title": "Смотрю"},
+            "не словарь",
+        ]
+        metadata = {
+            "1": None,
+            "2": {"genres": None, "franchise": None, "year": None, "kind": None, "related": None},
+            "3": {"genres": "драма", "related": {}},
+            "4": drama(),
+        }
+        profile = taste_profile(rates, metadata)
+        self.assertEqual(profile["scale"]["count"], 1)
+        self.assertEqual(profile["scale"]["median"], 7)
+        watched_ids = {item["id"] for item in profile["titles"]}
+        self.assertEqual(watched_ids, {"1", "2", "3", "4", "5"})
+        self.assertIsNone(next(item["score"] for item in profile["titles"] if item["id"] == "1"))
+        self.assertEqual(genre_weights(rates, metadata).get("10", 0), 0)
+        prompt = build_user_prompt(profile, [{"pair_rating": None, "interested_titles": None}], [None, "abc"], [
+            None, {"id": "20", "title": "Дырявый", "year": None, "kind": None, "genres": None, "score": None},
+        ])
+        self.assertIn("Без оценки", prompt)
+        self.assertIn("Личная шкала", prompt)
+        empty = taste_profile([
+            {"external_anime_id": "9", "status": "completed", "score": None, "title": "Только без оценки"},
+        ], None)
+        self.assertEqual(empty["genre_weights"], {})
+        self.assertEqual(empty["scale"]["count"], 0)
+        selected = select_candidates([
+            None,
+            {"id": "20", "kind": None, "year": None, "score": None, "genres": None, "related": None, "franchise": None},
+            {"id": "21", "kind": "tv", "year": None, "score": {"bad": True}, "genres": None,
+             "related": {"relation": "prequel"}, "franchise": None, "title": "Живой"},
+            {"id": "22", "kind": "ona", "year": "две тысячи", "score": "8.5", "genres": None,
+             "related": [None, "prequel"], "franchise": "", "title": "ОНА"},
+        ], excluded_shikimori_ids={None, ""}, excluded_series_ids={None, "нет"},
+           excluded_franchises={None}, already_recommended_ids={None}, limit=5)
+        self.assertEqual([item["id"] for item in selected], ["22", "21"])
+        self.assertEqual(find_continuations(rates, {"1": {"related": None}, "3": None, "5": {
+            "related": [{"relation": "sequel", "anime": {"id": "30", "title": "Дальше", "kind": None, "year": None}}],
+        }}), [{
+            "shikimori_anime_id": "30", "mal_id": None, "title": "Дальше", "year": None, "kind": None,
+            "after_title": "Смотрю", "after_shikimori_anime_id": "5",
+        }])
+        self.assertIsNone(normalize_anime({
+            "id": "40", "malId": None, "name": None, "russian": None, "score": None,
+            "kind": None, "franchise": None, "airedOn": None, "genres": None, "related": None,
+        }, include_related=True)["kind"])
 
     def test_dropped_keeps_its_score_and_does_not_change_genre_weights(self):
         completed = [
@@ -456,6 +515,40 @@ class ServiceTests(unittest.TestCase):
         seed_user(self.store, 2)
         _, created_for_other_user = service.request(2, "openai")
         self.assertTrue(created_for_other_user)
+
+    def test_unrated_completed_titles_still_produce_a_pick(self):
+        self.store.import_external_rates(1, "shikimori", [
+            {"external_rate_id": "blank", "external_anime_id": "80", "status": "completed",
+             "episodes": 12, "score": None, "title": "Без оценки"},
+            {"external_rate_id": "zero", "external_anime_id": "81", "status": "completed",
+             "episodes": 12, "score": 0, "title": "Ноль"},
+        ])
+        client = ScriptedClient([answer(100)])
+        service = self.service({"openai": client, "xai": ScriptedClient()})
+        job, _ = service.request(1, "openai")
+        asyncio.run(service.execute(job["id"]))
+        self.assertEqual(self.store.recommendation_job(job["id"])["state"], "ready")
+        self.assertEqual(client.calls, 1)
+        self.assertNotEqual(self.store.recommendation_job(job["id"])["error_code"], "profile")
+
+    def test_profile_failure_says_so_in_russian_and_does_not_call_the_model(self):
+        client = ScriptedClient([answer(100)])
+
+        class BrokenCatalog(ScriptedCatalog):
+            async def metadata(self, ids, *, related=False):
+                raise RuntimeError("metadata shape")
+
+        service = RecommendationService(
+            self.store, self.anime, BrokenCatalog(metadata(), [candidate(100, 1000)]),
+            {"openai": client, "xai": ScriptedClient()})
+        job, _ = service.request(1, "openai")
+        asyncio.run(service.execute(job["id"]))
+        failed = self.store.recommendation_job(job["id"])
+        self.assertEqual(failed["state"], "failed")
+        self.assertEqual(failed["error_code"], "profile")
+        self.assertIn("Не удалось подготовить профиль", failed["error_message"])
+        self.assertEqual(client.calls, 0)
+        self.assertFalse(failed["api_called"])
 
     def test_shikimori_refresh_failure_uses_the_saved_snapshot(self):
         async def refresh(_user_id):

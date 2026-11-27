@@ -14,16 +14,25 @@ def find_continuations(rates, anime_by_id):
     Only a Shikimori ``sequel`` relation counts. Spin-offs and side stories stay
     out of this block, and the caller's LLM pool is a separate list.
     """
-    by_id = {str(rate.get("external_anime_id") or ""): rate for rate in rates or ()}
-    found, seen = [], set()
+    by_id = {}
     for rate in rates or ():
-        if str(rate.get("status") or "") not in WATCHED_STATUSES:
+        if isinstance(rate, dict):
+            by_id[str(rate.get("external_anime_id") or "")] = rate
+    found, seen = [], set()
+    lookup = anime_by_id if isinstance(anime_by_id, dict) else {}
+    for rate in rates or ():
+        if not isinstance(rate, dict) or str(rate.get("status") or "") not in WATCHED_STATUSES:
             continue
         source_id = str(rate.get("external_anime_id") or "")
-        anime = (anime_by_id or {}).get(source_id) or {}
+        anime = lookup.get(source_id)
+        if not isinstance(anime, dict):
+            anime = {}
         after_title = str(rate.get("title") or anime.get("title") or "").strip()[:180] or "Просмотренный тайтл"
-        for relation in anime.get("related") or ():
-            if str(relation.get("relation") or "") != "sequel":
+        related = anime.get("related")
+        if not isinstance(related, (list, tuple)):
+            continue
+        for relation in related:
+            if not isinstance(relation, dict) or str(relation.get("relation") or "") != "sequel":
                 continue
             sequel = relation.get("anime") if isinstance(relation.get("anime"), dict) else None
             if not sequel:

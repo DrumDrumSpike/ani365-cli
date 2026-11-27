@@ -6,12 +6,27 @@ ALLOWED_KINDS = frozenset({"tv", "movie", "ona", "ova"})
 PREQUEL_RELATIONS = frozenset({"prequel", "parent_story"})
 
 
+def _relations(value):
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(item for item in value if isinstance(item, dict))
+
+
 def is_continuation(candidate):
     """True when this title continues an earlier story the model must not start mid-way."""
-    for relation in candidate.get("related") or ():
+    if not isinstance(candidate, dict):
+        return False
+    for relation in _relations(candidate.get("related")):
         if str(relation.get("relation") or "") in PREQUEL_RELATIONS:
             return True
     return False
+
+
+def _public_score(candidate):
+    try:
+        return float(candidate.get("score") or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _year(candidate):
@@ -35,14 +50,25 @@ def select_candidates(candidates, *, excluded_shikimori_ids, excluded_series_ids
     on Shikimori is dropped entirely (its next season belongs to the separate
     continuation hint). Previously recommended ids never return.
     """
-    excluded_shikimori_ids = {str(value) for value in excluded_shikimori_ids}
-    already_recommended_ids = {str(value) for value in already_recommended_ids}
-    excluded_series_ids = {int(value) for value in excluded_series_ids}
-    excluded_franchises = {str(value).strip().casefold() for value in excluded_franchises if str(value).strip()}
+    excluded_shikimori_ids = {str(value) for value in excluded_shikimori_ids or () if value is not None}
+    already_recommended_ids = {str(value) for value in already_recommended_ids or () if value is not None}
+    safe_series_ids = set()
+    for value in excluded_series_ids or ():
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            safe_series_ids.add(number)
+    excluded_series_ids = safe_series_ids
+    excluded_franchises = {str(value).strip().casefold() for value in excluded_franchises or ()
+                           if value is not None and str(value).strip()}
     limit = max(0, int(limit))
     prepared = []
     seen_ids, seen_series = set(), set()
     for candidate in candidates or ():
+        if not isinstance(candidate, dict):
+            continue
         identifier = str(candidate.get("id") or "").strip()
         kind = str(candidate.get("kind") or "").strip().casefold()
         if not identifier.isdigit() or kind not in ALLOWED_KINDS or is_continuation(candidate):
@@ -87,7 +113,7 @@ def select_candidates(candidates, *, excluded_shikimori_ids, excluded_series_ids
     for candidate in pool:
         buckets.setdefault(_year(candidate), []).append(candidate)
     for rows in buckets.values():
-        rows.sort(key=lambda candidate: (-float(candidate.get("score") or 0), str(candidate.get("id"))))
+        rows.sort(key=lambda candidate: (-_public_score(candidate), str(candidate.get("id") or "")))
     years = sorted((year for year in buckets if year), reverse=True)
     if 0 in buckets:
         years.append(0)
@@ -105,8 +131,14 @@ def select_candidates(candidates, *, excluded_shikimori_ids, excluded_series_ids
 
 def user_franchises(rates, metadata_by_id):
     found = set()
+    if not isinstance(metadata_by_id, dict):
+        metadata_by_id = {}
     for rate in rates or ():
-        anime = (metadata_by_id or {}).get(str(rate.get("external_anime_id") or "")) or {}
+        if not isinstance(rate, dict):
+            continue
+        anime = metadata_by_id.get(str(rate.get("external_anime_id") or ""))
+        if not isinstance(anime, dict):
+            anime = {}
         franchise = str(anime.get("franchise") or "").strip().casefold()
         if franchise:
             found.add(franchise)
