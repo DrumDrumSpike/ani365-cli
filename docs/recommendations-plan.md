@@ -49,8 +49,8 @@ watching и rewatching. Сиквел не показывается, если о�
 | Переменная | По умолчанию | Назначение |
 | --- | --- | --- |
 | `OPENAI_API_KEY` | пусто | ключ ChatGPT |
-| `OPENAI_MODEL` | `gpt-5.4-mini` | Chat Completions, JSON schema, reasoning |
-| `OPENAI_REASONING_EFFORT` | `medium` | `none`, `low`, `medium`, `high`, `xhigh`, `max` |
+| `OPENAI_MODEL` | `gpt-6.2-sol` | Chat Completions, JSON schema, reasoning. Дешевле: `gpt-6-luna` |
+| `OPENAI_REASONING_EFFORT` | `medium` | для `gpt-6.2-sol` нельзя `none`: `low`, `medium`, `high`, `xhigh`, `max` |
 | `XAI_API_KEY` | пусто | ключ Grok |
 | `XAI_MODEL` | `grok-4.7` | Chat Completions, JSON schema, reasoning |
 | `XAI_REASONING_EFFORT` | `medium` | у grok-4.7 нет `none`: `low`, `medium`, `high`, `xhigh` |
@@ -59,11 +59,11 @@ watching и rewatching. Сиквел не показывается, если о�
 | `RECOMMENDATION_LLM_TIMEOUT` | `180` | секунд на чтение одного ответа модели |
 
 Цены на ноябрь 2026, стандартный контекст короче 200 тысяч токенов.
-`gpt-5.4-mini`: $0.75 за 1M входных и $4.50 за 1M выходных, включая токены
+`gpt-6.2-sol`: $2 за 1M входных и $10 за 1M выходных, включая токены
 рассуждения. `grok-4.7`: $2 и $6 за 1M. Для промпта около 3 тысяч токенов и
-около 2.3 тысячи токенов ответа с reasoning уровня medium это примерно $0.012
+около 2.3 тысячи токенов ответа с reasoning уровня medium это примерно $0.03
 за клик ChatGPT и $0.020 за клик Grok. 200 запусков одного источника — около
-$2.50 и $4. Повтор при неверном JSON удваивает только этот клик. Лимит ответа
+$6 и $4. Повтор при неверном JSON удваивает только этот клик. Лимит ответа
 `max_completion_tokens` равен 4096, чтобы рассуждение не съело видимый JSON.
 
 Ошибки на русском: нет ключа, 401, 429 или закончившийся баланс, таймаут,

@@ -57,6 +57,11 @@ class LLMError(Exception):
         self.code = code
 
 
+def _rejects_reasoning_none(model):
+    name = str(model or "").strip()
+    return name == "gpt-6.2-sol" or name.startswith("gpt-6.2-sol-")
+
+
 def user_message(source, code):
     table = _MESSAGES.get(source) or _MESSAGES["openai"]
     return table.get(code) or table["unavailable"]
@@ -84,6 +89,12 @@ class ChatCompletionsClient:
     async def complete(self, system, user):
         if not self.api_key:
             raise LLMError("missing_key", user_message(self.source, "missing_key"))
+        if (self.reasoning_effort == "none" and self.source == "openai"
+                and _rejects_reasoning_none(self.model)):
+            raise LLMError(
+                "unavailable",
+                "Модель ChatGPT не принимает уровень рассуждения none. "
+                "Укажите medium или выше в OPENAI_REASONING_EFFORT.")
         body = {
             "model": self.model,
             "max_completion_tokens": self.max_completion_tokens,

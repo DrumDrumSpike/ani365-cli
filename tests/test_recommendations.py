@@ -2,16 +2,18 @@ import asyncio
 import hashlib
 import hmac
 import json
+import os
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 import httpx
 from fastapi.testclient import TestClient
 
-from ani365_bot.config import Config
+from ani365_bot.config import Config, ConfigError
 from ani365_bot.recommendations.candidates import select_candidates
 from ani365_bot.recommendations.continuations import find_continuations
 from ani365_bot.recommendations.llm import ChatCompletionsClient, LLMError
@@ -468,6 +470,23 @@ class ServiceTests(unittest.TestCase):
 
 
 class LLMHttpTests(unittest.TestCase):
+    def test_gpt_62_sol_is_the_default_and_rejects_reasoning_none(self):
+        base = {"BOT_TOKEN": "fake:token", "OWNER_ID": "42", "ANI365_TOKEN": "shared-token"}
+        with patch.dict(os.environ, base, clear=True):
+            config = Config.from_env()
+        self.assertEqual(config.openai_model, "gpt-6.2-sol")
+        self.assertEqual(config.openai_reasoning_effort, "medium")
+        self.assertEqual(config.xai_model, "grok-4.7")
+        with patch.dict(os.environ, {**base, "OPENAI_REASONING_EFFORT": "none"}, clear=True):
+            with self.assertRaises(ConfigError) as raised:
+                Config.from_env()
+        self.assertIn("none", str(raised.exception))
+        with patch.dict(os.environ, {**base, "OPENAI_MODEL": "gpt-6-luna",
+                                    "OPENAI_REASONING_EFFORT": "none"}, clear=True):
+            cheaper = Config.from_env()
+        self.assertEqual(cheaper.openai_model, "gpt-6-luna")
+        self.assertEqual(cheaper.openai_reasoning_effort, "none")
+
     def test_status_codes_become_russian_errors_without_the_body(self):
         seen = {}
 
@@ -482,13 +501,13 @@ class LLMHttpTests(unittest.TestCase):
             return httpx.Response(200, json={"choices": [{"message": {"content": "{\"picks\": []}"}}]})
 
         async def run():
-            limited = ChatCompletionsClient(source="openai", api_key="secret", model="gpt-5.4-mini",
+            limited = ChatCompletionsClient(source="openai", api_key="secret", model="gpt-6.2-sol",
                                             url="https://api.openai.com/429", transport=httpx.MockTransport(handler))
             with self.assertRaises(LLMError) as quota:
                 await limited.complete("system", "user")
             self.assertEqual(quota.exception.code, "rate_limited")
             self.assertNotIn("secret", str(quota.exception))
-            self.assertEqual(seen["body"]["model"], "gpt-5.4-mini")
+            self.assertEqual(seen["body"]["model"], "gpt-6.2-sol")
             self.assertEqual(seen["body"]["reasoning_effort"], "medium")
             self.assertGreaterEqual(seen["body"]["max_completion_tokens"], 4096)
             self.assertEqual(seen["body"]["response_format"]["type"], "json_schema")
@@ -501,15 +520,22 @@ class LLMHttpTests(unittest.TestCase):
             self.assertEqual(auth.exception.code, "unauthorized")
             self.assertIn("XAI_API_KEY", str(auth.exception))
             self.assertEqual(seen["body"]["reasoning_effort"], "medium")
-            slow = ChatCompletionsClient(source="openai", api_key="secret", model="gpt-5.4-mini",
+            slow = ChatCompletionsClient(source="openai", api_key="secret", model="gpt-6.2-sol",
                                          url="https://api.openai.com/slow", timeout=180,
                                          transport=httpx.MockTransport(handler))
             with self.assertRaises(LLMError) as timed_out:
                 await slow.complete("system", "user")
             self.assertEqual(timed_out.exception.code, "timeout")
             self.assertEqual(slow.timeout, 180)
-            missing = ChatCompletionsClient(source="openai", api_key="", model="gpt-5.4-mini",
+            missing = ChatCompletionsClient(source="openai", api_key="", model="gpt-6.2-sol",
                                             url="https://api.openai.com/v1/chat/completions")
+            refused = ChatCompletionsClient(
+                source="openai", api_key="secret", model="gpt-6.2-sol", reasoning_effort="none",
+                url="https://api.openai.com/v1/chat/completions",
+                transport=httpx.MockTransport(lambda _request: (_ for _ in ()).throw(AssertionError("sent"))))
+            with self.assertRaises(LLMError) as blocked:
+                await refused.complete("system", "user")
+            self.assertIn("none", str(blocked.exception))
             with self.assertRaises(LLMError) as absent:
                 await missing.complete("system", "user")
             self.assertEqual(absent.exception.code, "missing_key")

@@ -31,7 +31,7 @@ class Config:
     hentai_token: str = ""
     mal_client_id: str = ""
     openai_api_key: str = ""
-    openai_model: str = "gpt-5.4-mini"
+    openai_model: str = "gpt-6.2-sol"
     openai_reasoning_effort: str = "medium"
     xai_api_key: str = ""
     xai_model: str = "grok-4.7"
@@ -77,10 +77,14 @@ class Config:
             raise ConfigError("MAL_CLIENT_ID must be a single client identifier")
         openai_api_key = _optional_secret("OPENAI_API_KEY")
         xai_api_key = _optional_secret("XAI_API_KEY")
-        openai_model = _model_id("OPENAI_MODEL", "gpt-5.4-mini")
+        openai_model = _model_id("OPENAI_MODEL", "gpt-6.2-sol")
         xai_model = _model_id("XAI_MODEL", "grok-4.7")
         openai_reasoning_effort = _reasoning_effort("OPENAI_REASONING_EFFORT")
         xai_reasoning_effort = _reasoning_effort("XAI_REASONING_EFFORT")
+        if openai_reasoning_effort == "none" and _rejects_reasoning_none(openai_model):
+            raise ConfigError(
+                "OPENAI_REASONING_EFFORT cannot be none for "
+                f"{openai_model}; use low, medium, high, xhigh, or max")
         try:
             recommendation_daily_limit = int(os.environ.get("RECOMMENDATION_DAILY_LIMIT", "5"))
             recommendation_candidate_limit = int(os.environ.get("RECOMMENDATION_CANDIDATE_LIMIT", "36"))
@@ -170,6 +174,12 @@ def _model_id(name, default):
     if not value or len(value) > 128 or any(char.isspace() for char in value):
         raise ConfigError(f"{name} must be a single model id")
     return value
+
+
+def _rejects_reasoning_none(model):
+    """gpt-6.2-sol returns 400 when reasoning effort is none."""
+    name = str(model or "").strip()
+    return name == "gpt-6.2-sol" or name.startswith("gpt-6.2-sol-")
 
 
 def _reasoning_effort(name):
