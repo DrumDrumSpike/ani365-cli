@@ -240,6 +240,10 @@ class RecommendationService:
                 metadata = {**metadata, **await self._cached_metadata(
                 watched[:CONTINUATION_SOURCE_LIMIT], related=True)}
         found = find_continuations(rates, metadata)
+        extra = [item["shikimori_anime_id"] for item in found]
+        if extra:
+            metadata = {**metadata, **await self._cached_metadata(extra, related=True)}
+            found = find_continuations(rates, metadata)
         resolved = await resolve_candidates(self.anime, [
             {"id": item["shikimori_anime_id"], "mal_id": item.get("mal_id"), "title": item["title"],
              "year": item.get("year"), "kind": item.get("kind")}

@@ -394,7 +394,7 @@
       const statusText = !job ? '' : job.state === 'queued' ? `Подбор в очереди.${moodStatus} Можно закрыть приложение — запрос не продублируется.` : job.state === 'running' ? `Подбираем аниме.${moodStatus} Прошлая подборка остаётся на экране.` : job.state === 'failed' ? job.error_message || 'Не удалось подобрать аниме.' : '';
       const remaining = Math.max(0, Number(current.daily_limit) - Number(current.daily_used));
       const continuations = data.continuations || [];
-      const continuationBlock = continuations.length ? `<section class="panel"><h2>Вышло продолжение</h2><p class="meta">Следующий сезон того, что вы уже смотрели. Это не занимает место в подборке.</p>${recommendationCards(continuations.map(item => ({...item, reason: item.after_title ? `После «${item.after_title}»` : ''})) )}</section>` : '';
+      const continuationBlock = continuations.length ? `<section class="panel"><h2>Вышло продолжение</h2><p class="meta">Следующий сезон того, что вы уже досмотрели. Это не занимает место в подборке.</p>${recommendationCards(continuations.map(item => ({...item, reason: item.caption || (item.after_title ? `Продолжение «${item.after_title}» · у тебя просмотрено` : '')})) )}</section>` : '';
       let pickBlock = '';
       if (pick && pick.items && pick.items.length) {
         const saved = pick.pair_skipped ? 'Пара пропущена.' : pick.pair_rating ? `Ваша оценка пары: ${pick.pair_rating}.` : '';

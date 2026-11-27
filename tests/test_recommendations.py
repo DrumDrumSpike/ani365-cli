@@ -136,10 +136,7 @@ class TasteTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in selected], ["22", "21"])
         self.assertEqual(find_continuations(rates, {"1": {"related": None}, "3": None, "5": {
             "related": [{"relation": "sequel", "anime": {"id": "30", "title": "Дальше", "kind": None, "year": None}}],
-        }}), [{
-            "shikimori_anime_id": "30", "mal_id": None, "title": "Дальше", "year": None, "kind": None,
-            "after_title": "Смотрю", "after_shikimori_anime_id": "5",
-        }])
+        }}), [])
         self.assertIsNone(normalize_anime({
             "id": "40", "malId": None, "name": None, "russian": None, "score": None,
             "kind": None, "franchise": None, "airedOn": None, "genres": None, "related": None,
@@ -311,7 +308,7 @@ class CandidateAndContinuationTests(unittest.TestCase):
         rates = [
             {"external_anime_id": "1", "status": "completed", "title": "Сезон 1"},
             {"external_anime_id": "2", "status": "planned", "title": "Уже в планах"},
-            {"external_anime_id": "3", "status": "watching", "title": "Смотрю"},
+            {"external_anime_id": "3", "status": "watching", "title": "Смотрю", "episodes": 12},
             {"external_anime_id": "4", "status": "dropped", "title": "Брошенный старт"},
             {"external_anime_id": "8", "status": "completed", "title": "Закрытый сиквел"},
         ]
@@ -322,7 +319,7 @@ class CandidateAndContinuationTests(unittest.TestCase):
                                                  "kind": "tv", "year": 2025}},
                 {"relation": "side_story", "anime": {"id": "10", "title": "Спин-офф", "kind": "ova", "year": 2025}},
             ]},
-            "3": {"id": "3", "related": [
+            "3": {"id": "3", "episodes": 12, "related": [
                 {"relation": "sequel", "anime": {"id": "11", "title": "Продолжение", "kind": "ona", "year": 2023}},
             ]},
             "4": {"id": "4", "related": [
@@ -338,6 +335,79 @@ class CandidateAndContinuationTests(unittest.TestCase):
         self.assertEqual(set(found), {"9", "11"})
         self.assertEqual(found["9"]["after_title"], "Сезон 1")
         self.assertEqual(found["9"]["mal_id"], "90")
+        self.assertIn("Продолжение «Сезон 1»", found["9"]["caption"])
+
+    def test_continuation_accepts_only_a_later_sequel_of_a_finished_title(self):
+        from ani365_bot.recommendations.continuations import REJECTED_RELATIONS
+        ova = {"external_anime_id": "44", "status": "completed", "score": 9, "episodes": 4,
+               "title": "Бродяга Кэнсин: Воспоминания"}
+        tv = {"id": "45", "title": "Бродяга Кэнсин", "kind": "tv", "year": 1996,
+              "status": "released", "episodes": 94}
+        self.assertEqual(find_continuations([ova], {"44": {
+            "id": "44", "year": 1999, "kind": "ova", "episodes": 4,
+            "related": [{"relation": "sequel", "relation_en": "Sequel", "anime": tv}],
+        }}), [])
+        real = find_continuations(
+            [{"external_anime_id": "45", "status": "completed", "score": 9, "title": "Бродяга Кэнсин"}],
+            {"45": {"id": "45", "year": 1996, "kind": "tv", "episodes": 94, "related": [
+                {"relation": "sequel", "anime": {"id": "401", "title": "Прошедшие годы", "kind": "ova",
+                                                 "year": 2001, "status": "released", "episodes": 2}},
+                {"relation": "alternative_version", "anime": {"id": "50613", "title": "Ремейк",
+                                                              "kind": "tv", "year": 2023, "status": "released"}},
+            ]}})
+        self.assertEqual([item["shikimori_anime_id"] for item in real], ["401"])
+        self.assertEqual(real[0]["caption"],
+                         "Продолжение «Бродяга Кэнсин» · у тебя просмотрено, оценка 9 · OVA, 2 эп.")
+        base_rate = [{"external_anime_id": "1", "status": "completed", "score": None, "title": "Старт"}]
+        base_anime = {"id": "1", "year": 2010, "kind": "tv"}
+        for relation in REJECTED_RELATIONS:
+            found = find_continuations(base_rate, {"1": {**base_anime, "related": [
+                {"relation": relation, "anime": {"id": "2", "title": "Не сиквел", "kind": "tv",
+                                                 "year": 2012, "status": "released"}},
+            ]}})
+            self.assertEqual(found, [], relation)
+        self.assertEqual(find_continuations(base_rate, {"1": {**base_anime, "related": [
+            {"relation": "sequel", "anime": {"id": "3", "title": "Спешл", "kind": "special",
+                                             "year": 2011, "status": "released"}},
+            {"relation": "sequel", "anime": {"id": "4", "title": "Анонс", "kind": "tv",
+                                             "year": 2026, "status": "anons"}},
+            {"relation": "Side Story", "anime": {"id": "9", "title": "Сторона", "kind": "ova",
+                                                 "year": 2011, "status": "released"}},
+        ]}}), [])
+        soon = find_continuations(base_rate, {"1": {**base_anime, "related": [
+            {"relation": "Sequel", "relation_en": "Sequel", "anime": {
+                "id": "5", "title": "Скоро выйдет", "kind": "tv", "year": 2026, "status": "anons",
+                "status_text": "скоро"}},
+        ]}})
+        self.assertEqual([item["shikimori_anime_id"] for item in soon], ["5"])
+        partial = find_continuations(
+            [{"external_anime_id": "1", "status": "watching", "episodes": 3, "title": "Старт"}],
+            {"1": {**base_anime, "episodes": 12, "related": [
+                {"relation": "sequel", "anime": {"id": "6", "title": "Дальше", "kind": "tv",
+                                                 "year": 2011, "status": "released"}},
+            ]}})
+        self.assertEqual(partial, [])
+        finished = find_continuations(
+            [{"external_anime_id": "1", "status": "watching", "episodes": 12, "score": None, "title": "Старт"}],
+            {"1": {**base_anime, "episodes": 12, "related": [
+                {"relation": "sequel", "anime": {"id": "6", "title": "Дальше", "kind": "movie",
+                                                 "year": 2011, "status": "released"}},
+            ]}})
+        self.assertEqual(finished[0]["shikimori_anime_id"], "6")
+        self.assertNotIn("оценка", finished[0]["caption"])
+        self.assertIn("фильм", finished[0]["caption"])
+        chained = find_continuations(
+            [{"external_anime_id": "1", "status": "completed", "title": "Старт"},
+             {"external_anime_id": "8", "status": "planned", "title": "Уже третий"}],
+            {"1": {**base_anime, "related": [
+                {"relation": "sequel", "anime": {"id": "7", "title": "Второй", "kind": "tv",
+                                                 "year": 2011, "status": "released"}},
+            ]},
+             "7": {"id": "7", "related": [
+                 {"relation": "sequel", "anime": {"id": "8", "title": "Уже третий", "kind": "tv",
+                                                  "year": 2012, "status": "released"}},
+             ]}})
+        self.assertEqual(chained, [])
 
 
 class ResolveTests(unittest.TestCase):

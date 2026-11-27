@@ -12,7 +12,7 @@ class CatalogError(RuntimeError):
 
 
 _ANIME_FIELDS = """
-  id malId name russian score kind franchise airedOn { year }
+  id malId name russian score kind status episodes franchise airedOn { year }
   description
   genres { id name russian kind }
 """
@@ -21,7 +21,7 @@ _MARKUP = re.compile(r"\[/?[a-z]+(?:=[^\]]+)?\]", re.IGNORECASE)
 AWARD_WINNING_ID = "114"
 
 _RELATED_FIELDS = """
-  related { relationKind anime { id malId name russian kind franchise airedOn { year } } }
+  related { relationKind anime { id malId name russian kind status episodes franchise airedOn { year } } }
 """
 
 
@@ -68,6 +68,8 @@ def normalize_anime(row, *, include_related=False):
         "title": str(row.get("russian") or row.get("name") or "").strip()[:180],
         "score": row.get("score"),
         "kind": str(row.get("kind") or "").strip().casefold()[:32] or None,
+        "status": str(row.get("status") or "").strip().casefold()[:32] or None,
+        "episodes": _episodes(row.get("episodes")),
         "franchise": str(row.get("franchise") or "").strip()[:120] or None,
         "year": year,
         "genres": genres,
@@ -250,6 +252,14 @@ class ShikimoriCatalog:
         for item in chosen:
             hydrated.append({**item, **detailed.get(item["id"], {})})
         return hydrated
+
+
+def _episodes(value):
+    try:
+        number = int(value or 0)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
 def _rest_score(row):
