@@ -19,11 +19,14 @@ from ani365_bot.recommendations.catalog import normalize_anime
 from ani365_bot.recommendations.continuations import find_continuations
 from ani365_bot.recommendations.llm import ChatCompletionsClient, LLMError
 from ani365_bot.recommendations.parser import ParseError, parse_picks
-from ani365_bot.recommendations.mood import apply_mood, normalize_mood
+from ani365_bot.recommendations.mood import MOOD_GENRE_IDS, apply_mood, genre_ids_for, normalize_mood
 from ani365_bot.recommendations.prompt import SYSTEM_PROMPT, build_user_prompt
 from ani365_bot.recommendations.resolve import resolve_candidates
 from ani365_bot.recommendations.service import RecommendationRequestError, RecommendationService
-from ani365_bot.recommendations.taste import genre_weights, relative_signal, score_distribution, taste_profile
+from ani365_bot.recommendations.taste import (
+    genre_weights, prompt_sections, relative_signal, score_distribution, seed_title_ids,
+    source_genre_ids, taste_profile,
+)
 from ani365_bot.store import Store
 from ani365_bot.web import create_app
 
@@ -76,7 +79,7 @@ class TasteTests(unittest.TestCase):
         usual = relative_signal(7, easy)
         loved = relative_signal(10, easy)
         self.assertEqual(usual["label"], "typical")
-        self.assertEqual(loved["label"], "stands_out")
+        self.assertEqual(loved["label"], "top_tier")
         self.assertGreater(loved["weight"], usual["weight"])
         harsh = score_distribution([9, 9, 10, 10, 9, 10])
         low = relative_signal(7, harsh)
@@ -162,7 +165,7 @@ class TasteTests(unittest.TestCase):
         by_title = {item["title"]: item["score"] for item in profile["dropped"]}
         self.assertEqual(by_title["Бросил с оценкой"], 8)
         self.assertIsNone(by_title["Бросил без оценки"])
-        self.assertEqual(taste_profile(completed, metadata)["titles"][-1]["signal"], "stands_out")
+        self.assertEqual(taste_profile(completed, metadata)["titles"][-1]["signal"], "top_tier")
 
     def test_low_pair_rating_does_not_change_genre_weights(self):
         rates = [
@@ -178,6 +181,98 @@ class TasteTests(unittest.TestCase):
         prompt = build_user_prompt(taste_profile(rates, metadata), feedback, [], [])
         self.assertIn("оценка пары 1", prompt)
         self.assertEqual(taste_profile(rates, metadata)["genre_weights"], before)
+
+
+class ProfileAndCandidateSourceTests(unittest.TestCase):
+    def test_mood_table_uses_shikimori_ids_and_skips_award_winning(self):
+        self.assertEqual(MOOD_GENRE_IDS["swords"], ("21", "17", "13"))
+        self.assertEqual(MOOD_GENRE_IDS["isekai"], ("130", "106"))
+        self.assertEqual(MOOD_GENRE_IDS["cyberpunk"], ("24", "18", "38"))
+        self.assertEqual(MOOD_GENRE_IDS["magic"], ("10", "31", "1"))
+        self.assertNotIn("114", [genre_id for ids in MOOD_GENRE_IDS.values() for genre_id in ids])
+        swords = genre_ids_for(normalize_mood({"chips": ["any"], "note": "хочу самураев"}))
+        self.assertIn("21", swords)
+        self.assertEqual(genre_ids_for(normalize_mood({"chips": ["any"], "note": "неон и дождь"})), ())
+
+    def test_profile_order_follows_signal_and_collapses_franchises(self):
+        rates = [
+            {"external_anime_id": "1", "status": "completed", "score": 9, "title": "Адский рай",
+             "updated_at": 10},
+            {"external_anime_id": "2", "status": "completed", "score": 10, "title": "Яркий финал",
+             "updated_at": 20},
+        ]
+        for index in range(7):
+            rates.append({"external_anime_id": str(10 + index), "status": "completed", "score": 9,
+                          "title": f"Атака титанов {index}", "updated_at": 30 + index})
+        rates.append({"external_anime_id": "30", "status": "completed", "score": 6,
+                      "title": "Ааа слабое", "updated_at": 100})
+        metadata = {
+            "1": {"genres": [{"id": "1", "name": "Экшен", "kind": "genre"}], "franchise": "hells"},
+            "2": {"genres": [{"id": "24", "name": "Фантастика", "kind": "genre"},
+                             {"id": "38", "name": "Военное", "kind": "theme"}], "franchise": "bright"},
+        }
+        for index in range(7):
+            metadata[str(10 + index)] = {
+                "genres": [{"id": "1", "name": "Экшен", "kind": "genre"},
+                           {"id": "38", "name": "Военное", "kind": "theme"}],
+                "franchise": "aot",
+            }
+        metadata["30"] = {"genres": [{"id": "8", "name": "Драма", "kind": "genre"}], "franchise": "weak"}
+        profile = taste_profile(rates, metadata)
+        sections = prompt_sections(profile)
+        liked_titles = [row["title"] for row in sections["liked"]]
+        self.assertEqual(liked_titles[0], "Яркий финал")
+        self.assertLess(liked_titles.index("Яркий финал"), liked_titles.index("Адский рай"))
+        self.assertNotIn("Ааа слабое", liked_titles)
+        collapsed = [row for row in sections["liked"] if row.get("count")]
+        self.assertEqual(len(collapsed), 1)
+        self.assertEqual(collapsed[0]["count"], 7)
+        self.assertEqual(collapsed[0]["avg_score"], 9)
+        prompt = build_user_prompt(profile, [], [], [])
+        self.assertIn("франшиза", prompt)
+        self.assertIn("7 записей", prompt)
+        self.assertIn("темы: Военное", prompt)
+        self.assertIn("верхний уровень", prompt)
+        self.assertLess(prompt.index("Яркий финал"), prompt.index("Адский рай"))
+
+    def test_mood_filter_uses_the_whole_list_not_an_alphabetical_slice(self):
+        rates = []
+        metadata = {}
+        for index in range(12):
+            rates.append({"external_anime_id": str(index + 1), "status": "completed", "score": 10,
+                          "title": f"Абзац {index}", "updated_at": index})
+            metadata[str(index + 1)] = {"genres": [{"id": "8", "name": "Драма", "kind": "genre"}],
+                                        "franchise": f"drama-{index}"}
+        rates.append({"external_anime_id": "90", "status": "completed", "score": 7,
+                      "title": "Японский неон", "updated_at": 1})
+        rates.append({"external_anime_id": "91", "status": "dropped", "score": 8,
+                      "title": "Брошенный киберпанк", "updated_at": 2})
+        metadata["90"] = {"genres": [{"id": "24", "name": "Фантастика", "kind": "genre"},
+                                     {"id": "18", "name": "Меха", "kind": "theme"}],
+                          "franchise": "neon"}
+        metadata["91"] = {"genres": [{"id": "38", "name": "Военное", "kind": "theme"}], "franchise": "drop"}
+        profile = taste_profile(rates, metadata)
+        mood = normalize_mood({"chips": ["cyberpunk"]})
+        sections = prompt_sections(profile, genre_ids_for(mood))
+        matched = {row["title"] for row in sections["matched"]}
+        dropped = {row["title"] for row in sections["dropped"]}
+        self.assertEqual(matched, {"Японский неон"})
+        self.assertEqual(dropped, {"Брошенный киберпанк"})
+        prompt = build_user_prompt(profile, [], [], [], mood)
+        self.assertIn("Японский неон", prompt)
+        self.assertIn("Брошенный киберпанк", prompt)
+        self.assertNotIn("Абзац 0", prompt)
+
+    def test_candidate_sources_skip_award_winning_and_use_similar(self):
+        self.assertEqual(source_genre_ids({"114": 5, "24": 1}), ["24"])
+        self.assertEqual(source_genre_ids({"114": 5}), [])
+        profile = taste_profile([
+            {"external_anime_id": "4", "status": "completed", "score": 10, "title": "Любимый неон"},
+            {"external_anime_id": "5", "status": "completed", "score": 6, "title": "Обычное"},
+        ], {"4": {"genres": [{"id": "24", "name": "Фантастика", "kind": "genre"}], "franchise": "neo"},
+            "5": {"genres": [{"id": "114", "name": "Удостоено наград", "kind": "theme"}], "franchise": "award"}})
+        self.assertEqual(seed_title_ids(profile), ["4"])
+        self.assertNotIn("114", source_genre_ids(profile["genre_weights"]))
 
 
 class CandidateAndContinuationTests(unittest.TestCase):
@@ -565,6 +660,56 @@ class ServiceTests(unittest.TestCase):
         asyncio.run(service.execute(job["id"]))
         self.assertEqual(self.store.recommendation_job(job["id"])["state"], "ready")
         self.assertIn("Любимое", client.prompts[0])
+
+    def test_candidates_use_taste_genres_similar_titles_and_a_metadata_cache(self):
+        class Catalog(ScriptedCatalog):
+            def __init__(self):
+                super().__init__(metadata(), [{
+                    "id": "10", "mal_id": "10", "title": "Похожий неон", "year": 2021, "kind": "tv",
+                    "franchise": "sim", "score": 8,
+                    "genres": [{"id": "24", "name": "Фантастика", "kind": "genre"}],
+                    "description": "Город в неоне.",
+                }])
+                self.genre_calls = []
+                self.similar_calls = []
+                self.meta_calls = []
+
+            async def metadata(self, ids, *, related=False):
+                self.meta_calls.append([str(item) for item in ids])
+                payload = await super().metadata(ids, related=related)
+                stamped = {}
+                for identifier in ids:
+                    item = dict(payload.get(str(identifier)) or {})
+                    item["id"] = str(identifier)
+                    item["related_loaded"] = bool(related)
+                    stamped[str(identifier)] = item
+                return stamped
+
+            async def candidates(self, genres, searches=()):
+                self.genre_calls.append(list(genres))
+                return []
+
+            async def similar(self, ids):
+                self.similar_calls.append(list(ids))
+                return self.candidates_payload
+
+        catalog = Catalog()
+        client = ScriptedClient([answer(10), answer(10)])
+        service = RecommendationService(
+            self.store, self.anime, catalog, {"openai": client, "xai": ScriptedClient()})
+        job, _ = service.request(1, "openai")
+        with self.assertLogs("ani365_bot.recommendations", level="DEBUG") as logs:
+            asyncio.run(service.execute(job["id"]))
+        self.assertTrue(any("approx_tokens" in line for line in logs.output))
+        self.assertTrue(catalog.genre_calls)
+        self.assertNotIn("114", catalog.genre_calls[0])
+        self.assertEqual(catalog.similar_calls, [["4"]])
+        self.assertIn("Город в неоне.", client.prompts[0])
+        calls_after_first = len(catalog.meta_calls)
+        self.assertGreater(calls_after_first, 0)
+        again, _ = service.request(1, "openai")
+        asyncio.run(service.execute(again["id"]))
+        self.assertEqual(len(catalog.meta_calls), calls_after_first)
 
     def test_mood_filters_candidates_and_stays_on_the_job(self):
         catalog = ScriptedCatalog(metadata(), [

@@ -13,6 +13,40 @@ import unicodedata
 NOTE_LIMIT = 80
 PRIMARY_POOL = 4
 
+# Shikimori theme that only means "this title won awards". It must not be a candidate source.
+AWARD_WINNING_ID = "114"
+# Demographics describe the audience, not the vibe.
+DEMOGRAPHIC_IDS = frozenset({"15", "25", "27", "42", "43"})
+
+# One explicit mood -> Shikimori genre/theme id table.
+# Cyberpunk is not a current Shikimori tag; Sci-Fi, Mecha and Military are the catalog stand-in.
+MOOD_GENRE_IDS = {
+    "cyberpunk": ("24", "18", "38"),       # Sci-Fi, Mecha, Military
+    "isekai": ("130", "106"),              # Isekai, Reincarnation
+    "magic": ("10", "31", "1"),            # Fantasy, Super Power, Action
+    "swords": ("21", "17", "13"),          # Samurai, Martial Arts, Historical
+    "dark": ("14", "117", "105"),          # Horror, Suspense, Gore
+    "light": ("4", "20", "112"),           # Comedy, Parody, Gag Humor
+    "romance": ("22", "107"),              # Romance, Love Polygon
+    "psychological": ("40", "7", "117"),   # Psychological, Mystery, Suspense
+    "sports": ("30", "102", "118"),        # Sports, Team Sports, Combat Sports
+    "slice": ("36", "140"),                # Slice of Life, Iyashikei
+}
+
+# Obvious note words. Anything else stays a free-text hint for the model.
+NOTE_KEYWORDS = {
+    "cyberpunk": ("киберпанк", "cyberpunk"),
+    "isekai": ("исекай", "isekai", "реинкарнац"),
+    "magic": ("магическ", "суперсил"),
+    "swords": ("самура", "мечник", "боевые искусства"),
+    "dark": ("ужас", "хоррор", "триллер"),
+    "light": ("комеди",),
+    "romance": ("романтик",),
+    "psychological": ("психолог",),
+    "sports": ("спорт",),
+    "slice": ("повседнев",),
+}
+
 # Chip order is the Mini App order. "any" means the previous taste-only behaviour.
 MOODS = {
     "cyberpunk": {
@@ -141,6 +175,26 @@ def normalize_mood(mood):
     }
 
 
+def genre_ids_for(mood):
+    """Genre/theme ids for a chosen mood, plus obvious words in the free-text note.
+
+    An unmatched note does not add ids. The caller still passes that note to the model.
+    """
+    mood = mood if isinstance(mood, dict) and "chips" in mood else normalize_mood(mood)
+    chips = [chip for chip in mood.get("chips") or () if chip in MOOD_GENRE_IDS]
+    note = _fold(mood.get("note") or "")
+    if note:
+        for chip, words in NOTE_KEYWORDS.items():
+            if chip not in chips and any(word in note for word in words):
+                chips.append(chip)
+    ids = []
+    for chip in chips:
+        for genre_id in MOOD_GENRE_IDS.get(chip, ()):
+            if genre_id not in ids and genre_id != AWARD_WINNING_ID:
+                ids.append(genre_id)
+    return tuple(ids)
+
+
 def mood_searches(mood):
     """Shikimori search phrases that pull vibe matches the taste genres would miss."""
     mood = mood if isinstance(mood, dict) and "chips" in mood else normalize_mood(mood)
@@ -167,7 +221,26 @@ def _blob(candidate):
     return _fold(" ".join(names) + " " + str(candidate.get("title") or ""))
 
 
-def _chip_score(blob, chip, note_hits):
+def _genre_ids(candidate):
+    found = []
+    genres = candidate.get("genres") if isinstance(candidate.get("genres"), (list, tuple)) else ()
+    extra = candidate.get("genre_ids") if isinstance(candidate.get("genre_ids"), (list, tuple)) else ()
+    for genre_id in extra:
+        text = str(genre_id or "").strip()
+        if text.isdigit() and text not in found:
+            found.append(text)
+    for genre in genres:
+        if not isinstance(genre, dict):
+            continue
+        text = str(genre.get("id") or "").strip()
+        if text.isdigit() and text not in found:
+            found.append(text)
+    return found
+
+
+def _chip_score(blob, chip, note_hits, genre_ids):
+    if set(genre_ids) & set(MOOD_GENRE_IDS.get(chip, ())):
+        return 2 + note_hits
     spec = MOODS.get(chip) or {}
     if any(needle in blob for needle in spec.get("primary") or ()):
         return 2 + note_hits
@@ -192,15 +265,20 @@ def apply_mood(candidates, mood):
     """Keep vibe matches. A few strong matches outrank a pile of loose ones."""
     mood = mood if isinstance(mood, dict) and "open" in mood else normalize_mood(mood)
     rows = [candidate for candidate in candidates or () if isinstance(candidate, dict)]
-    if mood.get("open"):
+    chips = [chip for chip in mood.get("chips") or () if chip in MOOD_GENRE_IDS]
+    note = mood.get("note") or ""
+    if note:
+        for chip, words in NOTE_KEYWORDS.items():
+            if chip not in chips and any(word in _fold(note) for word in words):
+                chips.append(chip)
+    if mood.get("open") or not chips:
         return [{**candidate, "_mood": 0} for candidate in rows]
     primary, secondary = [], []
-    chips = [chip for chip in mood.get("chips") or () if chip != "any"]
-    note = mood.get("note") or ""
     for candidate in rows:
         blob = _blob(candidate)
+        genre_ids = _genre_ids(candidate)
         note_hits = _note_hits(blob, note)
-        score = max((_chip_score(blob, chip, note_hits) for chip in chips), default=note_hits)
+        score = max((_chip_score(blob, chip, note_hits, genre_ids) for chip in chips), default=note_hits)
         if score >= 2:
             primary.append({**candidate, "_mood": score})
         elif score == 1:

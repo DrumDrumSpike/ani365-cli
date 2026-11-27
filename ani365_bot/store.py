@@ -8,7 +8,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 
 HENTAI_SERIES_OFFSET = 1_000_000_000_000
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 
 class StateError(ValueError):
@@ -158,6 +158,11 @@ class Store:
             with self.db:
                 self._create_v16()
                 self.db.execute("PRAGMA user_version = 16")
+            version = 16
+        if version < 17:
+            with self.db:
+                self._create_v17()
+                self.db.execute("PRAGMA user_version = 17")
 
     def seasonal_snapshot(self):
         row = self.db.execute("SELECT payload FROM seasonal_catalog WHERE id=1").fetchone()
@@ -604,6 +609,21 @@ class Store:
             )
         """)
 
+    def _create_v17(self):
+        """Remember when a Shikimori rate changed, and cache anime metadata between runs."""
+        tables = {row[0] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "external_user_rates" in tables:
+            columns = {row[1] for row in self.db.execute("PRAGMA table_info(external_user_rates)")}
+            if "rate_updated_at" not in columns:
+                self.db.execute("ALTER TABLE external_user_rates ADD COLUMN rate_updated_at REAL")
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS shikimori_anime_cache (
+                shikimori_id TEXT PRIMARY KEY,
+                payload TEXT NOT NULL,
+                fetched_at REAL NOT NULL
+            )
+        """)
+
     @staticmethod
     def _now(value):
         return time.time() if value is None else float(value)
@@ -1014,8 +1034,12 @@ class Store:
     @staticmethod
     def _external_rate(row):
         keys = ("external_rate_id", "external_anime_id", "status", "episodes", "title",
-                "anime365_series_id", "imported_at", "score")
-        return dict(zip(keys, row)) if row else None
+                "anime365_series_id", "imported_at", "score", "rate_updated_at")
+        if not row:
+            return None
+        item = dict(zip(keys, row))
+        item["updated_at"] = item.get("rate_updated_at")
+        return item
 
     @staticmethod
     def _recommendation_score(value):
@@ -1049,6 +1073,11 @@ class Store:
                 except (TypeError, ValueError):
                     episodes = 0
                 score = self._recommendation_score(rate.get("score"))
+                updated = rate.get("updated_at", rate.get("rate_updated_at"))
+                try:
+                    updated = float(updated) if updated is not None and updated != "" else None
+                except (TypeError, ValueError):
+                    updated = None
                 if not rate_id or not anime_id or not status:
                     continue
                 mapped = self.external_series_id(provider, anime_id)
@@ -1060,18 +1089,68 @@ class Store:
                 self.db.execute("""
                     INSERT INTO external_user_rates(
                         user_id, provider, external_rate_id, external_anime_id, status, episodes,
-                        title, anime365_series_id, imported_at, score
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        title, anime365_series_id, imported_at, score, rate_updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(user_id, provider, external_rate_id) DO UPDATE SET
                         external_anime_id=excluded.external_anime_id, status=excluded.status,
                         episodes=excluded.episodes, title=excluded.title, imported_at=excluded.imported_at,
                         score=excluded.score,
+                        rate_updated_at=COALESCE(excluded.rate_updated_at, external_user_rates.rate_updated_at),
                         anime365_series_id=COALESCE(external_user_rates.anime365_series_id,
                                                      excluded.anime365_series_id)
                 """, (user_id, provider, rate_id, anime_id, status, episodes, title, series_id, timestamp,
-                      score))
+                      score, updated))
                 imported.append(rate_id)
         return imported
+
+    def cached_shikimori_anime(self, anime_ids, *, now, max_age, require_related=False):
+        """Return fresh cached Shikimori cards. Missing or stale ids are omitted."""
+        now = self._now(now)
+        max_age = max(0, float(max_age))
+        wanted, seen = [], set()
+        for value in anime_ids or ():
+            text = str(value).strip()
+            if text.isdigit() and text not in seen:
+                wanted.append(text)
+                seen.add(text)
+        found = {}
+        for offset in range(0, len(wanted), 900):
+            batch = wanted[offset:offset + 900]
+            if not batch:
+                continue
+            placeholders = ", ".join("?" for _ in batch)
+            rows = self.db.execute(f"""
+                SELECT shikimori_id, payload, fetched_at
+                FROM shikimori_anime_cache WHERE shikimori_id IN ({placeholders})
+            """, batch).fetchall()
+            for identifier, payload, fetched_at in rows:
+                try:
+                    age = now - float(fetched_at)
+                    item = json.loads(payload)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if age > max_age or not isinstance(item, dict):
+                    continue
+                if require_related and not item.get("related_loaded"):
+                    continue
+                found[str(identifier)] = item
+        return found
+
+    def save_shikimori_anime(self, items, *, now):
+        moment = self._now(now)
+        with self.db:
+            for item in items or ():
+                if not isinstance(item, dict):
+                    continue
+                identifier = str(item.get("id") or "").strip()
+                if not identifier.isdigit():
+                    continue
+                self.db.execute("""
+                    INSERT INTO shikimori_anime_cache(shikimori_id, payload, fetched_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(shikimori_id) DO UPDATE SET
+                        payload=excluded.payload, fetched_at=excluded.fetched_at
+                """, (identifier, json.dumps(item, ensure_ascii=False), moment))
 
     def external_user_rates(self, user_id, provider, *, linked=None, limit=2000, offset=0):
         user_id = self._positive_id(user_id, "user_id")
@@ -1084,7 +1163,7 @@ class Store:
         offset = max(0, int(offset))
         rows = self.db.execute(f"""
             SELECT external_rate_id, external_anime_id, status, episodes, title,
-                   anime365_series_id, imported_at, score
+                   anime365_series_id, imported_at, score, rate_updated_at
             FROM external_user_rates WHERE {' AND '.join(where)}
             ORDER BY imported_at DESC, title COLLATE NOCASE LIMIT ? OFFSET ?
         """, [*params, limit, offset]).fetchall()
@@ -1106,7 +1185,7 @@ class Store:
         user_id = self._positive_id(user_id, "user_id")
         row = self.db.execute("""
             SELECT external_rate_id, external_anime_id, status, episodes, title,
-                   anime365_series_id, imported_at, score
+                   anime365_series_id, imported_at, score, rate_updated_at
             FROM external_user_rates
             WHERE user_id=? AND provider=? AND external_rate_id=?
         """, (user_id, str(provider), str(rate_id))).fetchone()
@@ -1163,7 +1242,7 @@ class Store:
         series_id = self._positive_id(series_id, "series_id")
         row = self.db.execute("""
             SELECT external_rate_id, external_anime_id, status, episodes, title,
-                   anime365_series_id, imported_at, score
+                   anime365_series_id, imported_at, score, rate_updated_at
             FROM external_user_rates
             WHERE user_id=? AND provider=? AND anime365_series_id=?
             ORDER BY imported_at DESC LIMIT 1
