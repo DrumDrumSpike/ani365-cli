@@ -131,6 +131,11 @@ class MiniElement {
     return found;
   }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+  get previousElementSibling() {
+    const siblings = (this.parent?.children || []).filter(child => child.matches);
+    const index = siblings.indexOf(this);
+    return index > 0 ? siblings[index - 1] : null;
+  }
   closest(selector) {
     let node = this;
     while (node) {
@@ -325,18 +330,23 @@ test('recommendations view renders every owner-visible state without a TDZ error
   payloads.current = recommendationBody({
     job: {id: 2, state: 'ready', error_message: null},
     pick: {id: 8, created_at: 1, pair_rating: null, pair_skipped: false, items: [
-      {shikimori_anime_id: '11', anime365_series_id: 56, title: 'Готовая пара', year: 2020, kind: 'tv', reason: 'Спокойная история.', interested: false},
+      {shikimori_anime_id: '11', anime365_series_id: 56, title: 'Готовая пара', year: 2020, kind: 'tv', reason: 'Как и «Адский рай», который ты оценил на 9, эта история держит тот же тон без спойлеров и досматривается до конца.', interested: false},
     ]},
   });
   await openRecommendations(root);
   assert.match(root.innerHTML, /Готовая пара/);
-  assert.match(root.innerHTML, /Спокойная история/);
+  assert.match(root.innerHTML, /досматривается до конца/);
   assert.match(root.innerHTML, /Подобрать аниме/);
+  const toggle = root.querySelector('[data-reason-toggle]');
+  assert.equal(toggle.textContent, 'Подробнее');
+  toggle.click();
+  assert.match(root.innerHTML, /recommendation-reason expanded/);
+  assert.equal(toggle.textContent, 'Свернуть');
 
   payloads.current = recommendationBody({
     job: {id: 3, state: 'failed', error_message: 'У ChatGPT закончился лимит или баланс. Попробуйте позже.'},
     pick: {id: 8, created_at: 1, pair_rating: null, pair_skipped: false, items: [
-      {shikimori_anime_id: '11', anime365_series_id: 56, title: 'Готовая пара', year: 2020, kind: 'tv', reason: 'Спокойная история.', interested: false},
+      {shikimori_anime_id: '11', anime365_series_id: 56, title: 'Готовая пара', year: 2020, kind: 'tv', reason: 'Как и «Адский рай», который ты оценил на 9, эта история держит тот же тон без спойлеров и досматривается до конца.', interested: false},
     ]},
   });
   await openRecommendations(root);
@@ -345,12 +355,16 @@ test('recommendations view renders every owner-visible state without a TDZ error
 
   payloads.history = {items: [{
     id: 8, source: 'openai', created_at: 1_700_000_000, pair_rating: 2, pair_skipped: false,
-    items: [{shikimori_anime_id: '11', anime365_series_id: 56, title: 'Готовая пара', year: 2020, kind: 'tv', reason: 'Спокойная история.', interested: true}],
+    items: [{shikimori_anime_id: '11', anime365_series_id: 56, title: 'Готовая пара', year: 2020, kind: 'tv', reason: 'Как и «Адский рай», который ты оценил на 9, эта история держит тот же тон без спойлеров и досматривается до конца.', interested: true}],
   }]};
   root.querySelector('#recommendation-history').click();
   await flush();
   assert.match(root.innerHTML, /История подборок/);
   assert.match(root.innerHTML, /Готовая пара/);
+  assert.match(root.innerHTML, /досматривается до конца/);
   assert.match(root.innerHTML, /Оценка пары: 2/);
+  const historyToggle = root.querySelector('[data-reason-toggle]');
+  historyToggle.click();
+  assert.match(root.innerHTML, /recommendation-reason expanded/);
   assert.doesNotMatch(root.innerHTML, /before initialization/);
 });
